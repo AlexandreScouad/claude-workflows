@@ -1,0 +1,24 @@
+# Example caller workflow — copy to your project's .github/workflows/
+name: Claude Estimate
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  estimate:
+    if: github.event.label.name == 'estimate-ready'
+    uses: scouad/claude-workflows/.github/workflows/claude-estimate.yml@main
+    with:
+      base_branch: recette
+      project_name: mon-projet
+      # estimation_grid: ''   # empty = standard Scouad grid
+    secrets: inherit
+
+  sync:
+    if: github.event.label.name == 'estimate-approved'
+    uses: scouad/claude-workflows/.github/workflows/claude-estimate.yml@main
+    with:
+      base_branch: recette
+      project_name: mon-projet
+    secrets: inherit

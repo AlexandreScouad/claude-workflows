@@ -1,0 +1,20 @@
+# Example caller workflow — copy to your project's .github/workflows/
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, labeled]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+
+jobs:
+  review:
+    if: github.event.action != 'labeled' || github.event.label.name == 'review-ready'
+    uses: scouad/claude-workflows/.github/workflows/claude-pr-review.yml@main
+    with:
+      project_name: mon-projet
+      # extra_review_rules: |
+      #   **Supabase** : Singleton client, pas de router.refresh()
+      #   **RPC** : Workflow SEARCH→REUSE→ADAPT→CREATE
+    secrets: inherit

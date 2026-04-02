@@ -1,0 +1,295 @@
+name: Claude Plan (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      base_branch:
+        description: 'Branch to checkout (e.g. recette, develop, main)'
+        type: string
+        default: 'recette'
+      project_name:
+        description: 'Human-readable project name for logs'
+        type: string
+        required: true
+      auto_approve_threshold:
+        description: 'Confidence score threshold for auto-approving bug plans (0-100)'
+        type: number
+        default: 60
+      model:
+        description: 'Claude model to use'
+        type: string
+        default: 'claude-opus-4-6'
+      max_turns:
+        description: 'Max Claude turns'
+        type: number
+        default: 50
+      extra_prompt:
+        description: 'Extra project-specific instructions appended to the prompt'
+        type: string
+        default: ''
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  generate-plan:
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    concurrency:
+      group: claude-plan-${{ github.event.issue.number }}
+      cancel-in-progress: true
+
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Check if plan already approved
+        id: check-approved
+        run: |
+          LABELS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+          if echo "$LABELS" | grep -q "plan-approved"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+
+      - name: Checkout repository
+        if: steps.check-approved.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 1
+
+      - name: Discover project docs
+        if: steps.check-approved.outputs.skip != 'true'
+        id: docs
+        run: |
+          DOC_FILES=$(ls CLAUDE*.md 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+          echo "files=$DOC_FILES" >> $GITHUB_OUTPUT
+
+          INSTRUCTIONS=""
+          for f in CLAUDE*.md; do
+            [ -f "$f" ] && INSTRUCTIONS="${INSTRUCTIONS}\n- \`$f\`"
+          done
+          echo "read_list<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$INSTRUCTIONS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # Note: github.event.issue.title and .body are used in the 'prompt' input
+      # of claude-code-action, NOT in a shell run: block. This is safe — action
+      # inputs are passed as strings, not interpolated by the shell.
+      - name: Generate plan with Claude
+        if: steps.check-approved.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "makeplane[bot]"
+          allowed_tools: "Glob,Grep,Read,Bash(git log *),Bash(git diff *),Bash(ls *)"
+          track_progress: "true"
+          prompt: |
+            Tu es un architecte logiciel senior. Produis un plan d'implementation detaille.
+            Ta reponse sera postee comme commentaire sur l'issue — NE CREE AUCUN FICHIER.
+
+            ## Issue #${{ github.event.issue.number }}
+            **Titre** : ${{ github.event.issue.title }}
+            **Description** :
+            ${{ github.event.issue.body }}
+
+            ## Phase 1 — RECHERCHE
+
+            1. Lis OBLIGATOIREMENT tous les fichiers CLAUDE*.md a la racine :
+            ${{ steps.docs.outputs.read_list }}
+
+            2. Explore le codebase avec Glob, Grep, Read :
+               - Identifie les fichiers impactes et les patterns existants
+               - Cherche des implementations similaires a reutiliser (SEARCH → REUSE → ADAPT → CREATE)
+               - Comprends les types, interfaces et contrats existants
+
+            ## Phase 2 — ANALYSE
+
+            Determine :
+            - Ce qui est demande (feature, bug fix, refactoring)
+            - Les criteres d'acceptation (explicites dans l'issue OU deduits)
+            - Les contraintes et dependances
+
+            ## Phase 3 — PLANIFICATION
+
+            Decompose en **taches atomiques**. Chaque tache DOIT etre :
+            - Independamment committable (un commit = une tache)
+            - Testable avec une commande de verification concrete
+            - Scopee a 1-3 fichiers max (tient dans un contexte frais)
+
+            ## Phase 4 — VERIFICATION DU PLAN (Plan Checker GSD)
+
+            Avant de poster, verifie ton plan sur ces **8 dimensions** :
+
+            | # | Dimension | Question | Passe ? |
+            |---|-----------|----------|---------|
+            | 1 | **Couverture requirements** | Chaque critere d'acceptation est adresse par au moins 1 tache ? | |
+            | 2 | **Atomicite** | Chaque tache = 1 commit independant, 1-3 fichiers ? | |
+            | 3 | **Ordre des dependances** | Les taches dependantes viennent apres leurs pre-requis ? | |
+            | 4 | **Scope fichiers** | Pas de chevauchement excessif entre taches ? | |
+            | 5 | **Commandes de verification** | Chaque tache a un `done_criteria` verifiable (commande ou test) ? | |
+            | 6 | **Context fit** | Chaque tache tient dans un contexte frais de 200K tokens ? | |
+            | 7 | **Detection de gaps** | Aucune etape manquante entre l'etat actuel et le resultat ? | |
+            | 8 | **Testabilite (Nyquist)** | Le plan de test couvre les scenarios critiques ET les edge cases ? | |
+
+            Si une dimension echoue, REVISE le plan (max 3 iterations).
+
+            ## FORMAT DE SORTIE
+
+            Commence EXACTEMENT par :
+            🔽 PLAN-START 🔽
+            <details>
+            <summary>📋 Plan d'implementation — Issue #${{ github.event.issue.number }}</summary>
+
+            # Plan d'implementation — Issue #${{ github.event.issue.number }}
+
+            ## Resume
+            [1-2 phrases : solution choisie et approche]
+
+            ## Fichiers impactes
+            | Fichier | Action | Description |
+            |---------|--------|-------------|
+            | `path/file` | Modifier/Creer | Ce qui change |
+
+            ## Taches (atomiques, ordonnees)
+            - [ ] **Tache 1** : [Description precise]
+              - Fichiers : `file1`, `file2`
+              - Details : [Ce qu'il faut faire exactement]
+              - Done criteria : `commande ou verification`
+            - [ ] **Tache 2** : [Description]
+              - Depend de : Tache 1
+              - Fichiers : ...
+              - Done criteria : ...
+
+            ## Verification du plan (8 dimensions)
+            | Dimension | Statut | Note |
+            |-----------|--------|------|
+            | Couverture requirements | ✅/❌ | |
+            | Atomicite | ✅/❌ | |
+            | Ordre dependances | ✅/❌ | |
+            | Scope fichiers | ✅/❌ | |
+            | Commandes verification | ✅/❌ | |
+            | Context fit | ✅/❌ | |
+            | Gaps | ✅/❌ | |
+            | Testabilite | ✅/❌ | |
+
+            ## Risques et mitigations
+            - [Risque → mitigation]
+
+            ## Plan de test
+            <!-- TEST-PLAN-START -->
+            | # | Scenario | Type | Criticite | Commande/verification |
+            |---|----------|------|-----------|----------------------|
+            | 1 | [Scenario] | fonctionnel | critique | `commande` |
+            <!-- TEST-PLAN-END -->
+
+            Termine par :
+            </details>
+            🔼 PLAN-END 🔼
+            ---
+            *Ajoutez le label `plan-approved` pour lancer l'implementation.*
+
+            ${{ inputs.extra_prompt }}
+
+            ## Regles STRICTES
+            - NE CREE AUCUN FICHIER — le plan est dans ta reponse
+            - Reference des fichiers REELS du codebase
+            - Chaque tache doit avoir un `done_criteria` verifiable
+            - Si le scope depasse 8 taches, decoupe en sous-issues
+
+            ## Evaluation de confiance (OBLIGATOIRE, commentaire HTML en fin de reponse)
+
+            8 axes (0-12.5pts chacun, total 0-100) :
+            - **requirement_coverage** : tous les criteres couverts ? (12.5=oui, 6=partiel, 0=non)
+            - **task_atomicity** : taches atomiques et committables ? (12.5=oui, 6=certaines trop larges)
+            - **dependency_order** : dependances correctes ? (12.5=oui, 6=ambigu)
+            - **file_scope** : pas de chevauchement excessif ? (12.5=clean, 6=overlap)
+            - **verification_commands** : done criteria verifiables ? (12.5=tous, 6=certains manquent)
+            - **context_fit** : taches tiennent en contexte frais ? (12.5=oui, 6=certaines larges)
+            - **gap_detection** : pas d'etapes manquantes ? (12.5=complet, 6=gaps mineurs)
+            - **testability** : plan de test couvre critiques + edge cases ? (12.5=oui, 6=partiel)
+
+            auto_approve=true si score>=${{ inputs.auto_approve_threshold }} ET bug ET pas de migration risquee ET 8/8 dimensions vertes.
+
+            Format (une seule ligne, commentaire HTML) :
+            <!-- PLAN-CONFIDENCE: {"score": N, "auto_approve": bool, "factors": {"requirement_coverage": N, "task_atomicity": N, "dependency_order": N, "file_scope": N, "verification_commands": N, "context_fit": N, "gap_detection": N, "testability": N}} -->
+
+          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+
+      - name: Extract plan confidence
+        if: success() && steps.check-approved.outputs.skip != 'true'
+        id: confidence
+        run: |
+          echo "auto_approve=false" >> "$GITHUB_OUTPUT"
+          echo "score=0" >> "$GITHUB_OUTPUT"
+          echo "factors={}" >> "$GITHUB_OUTPUT"
+
+          IS_BUG=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
+            --jq '[.labels[].name] | map(ascii_downcase) | map(select(. == "bug")) | length')
+
+          if [ "$IS_BUG" = "0" ]; then
+            echo "reason=not_a_bug" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CONFIDENCE_JSON=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
+            --jq '.comments | map(select(.body | contains("PLAN-CONFIDENCE"))) | last | .body // ""' \
+            2>/dev/null | sed -n 's/.*<!-- PLAN-CONFIDENCE: \(.*\) -->.*/\1/p' | tail -1)
+
+          if [ -z "$CONFIDENCE_JSON" ] || ! echo "$CONFIDENCE_JSON" | jq empty 2>/dev/null; then
+            echo "reason=no_valid_marker" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SCORE=$(echo "$CONFIDENCE_JSON" | jq -r '.score // 0')
+          AUTO_APPROVE=$(echo "$CONFIDENCE_JSON" | jq -r '.auto_approve // false')
+          FACTORS=$(echo "$CONFIDENCE_JSON" | jq -c '.factors // {}')
+
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "factors=$FACTORS" >> "$GITHUB_OUTPUT"
+
+          THRESHOLD="${{ inputs.auto_approve_threshold }}"
+          if [ "$AUTO_APPROVE" = "true" ] && [ "$SCORE" -ge "$THRESHOLD" ] 2>/dev/null; then
+            echo "auto_approve=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "auto_approve=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+
+      - name: Swap labels
+        if: success() && steps.check-approved.outputs.skip != 'true'
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --remove-label "claude-ready" 2>/dev/null || true
+
+          if [ "$AUTO_APPROVE" = "true" ]; then
+            gh label create "plan-approved" --color "0e8a16" --description "Plan approuve" 2>/dev/null || true
+            gh issue edit "$ISSUE_NUMBER" --add-label "plan-approved"
+            gh issue comment "$ISSUE_NUMBER" --body "🤖 **Auto-approbation** (confiance : ${SCORE}/100)
+          > Facteurs : ${FACTORS}
+          ℹ️ Pour annuler : retirez \`plan-approved\`, ajoutez \`plan-to-review\`."
+          else
+            gh label create "plan-to-review" --color "fbca04" --description "Plan pret pour revue" 2>/dev/null || true
+            gh issue edit "$ISSUE_NUMBER" --add-label "plan-to-review"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          AUTO_APPROVE: ${{ steps.confidence.outputs.auto_approve }}
+          SCORE: ${{ steps.confidence.outputs.score }}
+          FACTORS: ${{ steps.confidence.outputs.factors }}

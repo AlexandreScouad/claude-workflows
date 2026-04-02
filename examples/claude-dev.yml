@@ -1,0 +1,22 @@
+# Example caller workflow — copy to your project's .github/workflows/
+name: Claude Dev
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  implement:
+    if: github.event.label.name == 'plan-approved'
+    uses: scouad/claude-workflows/.github/workflows/claude-dev.yml@main
+    with:
+      base_branch: recette
+      project_name: mon-projet
+      node_version: '20'
+      # install_command: 'npm ci'           # default
+      # lint_command: 'npm run lint:fix'     # default
+      # typecheck_command: 'npm run check-types'  # default
+      # extra_prompt: |
+      #   - Workflow RPC : SEARCH → REUSE → ADAPT → CREATE
+      #   - Messages d'erreur en francais
+    secrets: inherit

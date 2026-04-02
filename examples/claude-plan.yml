@@ -1,0 +1,21 @@
+# Example caller workflow — copy to your project's .github/workflows/
+name: Claude Plan
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  plan:
+    if: github.event.label.name == 'claude-ready'
+    uses: scouad/claude-workflows/.github/workflows/claude-plan.yml@main
+    with:
+      base_branch: recette           # or 'develop', 'main'
+      project_name: mon-projet       # used in logs
+      # auto_approve_threshold: 60   # default 60
+      # model: claude-opus-4-6       # default
+      # max_turns: 50                # default
+      # extra_prompt: |              # project-specific instructions
+      #   - Suis le workflow RPC : SEARCH → REUSE → ADAPT → CREATE
+      #   - Verifie les contraintes metier telecom
+    secrets: inherit

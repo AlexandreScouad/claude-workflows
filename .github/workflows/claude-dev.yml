@@ -1,0 +1,292 @@
+name: Claude Dev (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      base_branch:
+        description: 'Branch to checkout and PR target'
+        type: string
+        default: 'recette'
+      project_name:
+        description: 'Human-readable project name'
+        type: string
+        required: true
+      node_version:
+        description: 'Node.js version'
+        type: string
+        default: '20'
+      install_command:
+        description: 'Dependency install command'
+        type: string
+        default: 'npm ci'
+      lint_command:
+        description: 'Lint fix command'
+        type: string
+        default: 'npm run lint:fix'
+      typecheck_command:
+        description: 'Type check command'
+        type: string
+        default: 'npm run check-types'
+      model:
+        description: 'Claude model'
+        type: string
+        default: 'claude-opus-4-6'
+      max_turns:
+        description: 'Max Claude turns'
+        type: number
+        default: 100
+      extra_prompt:
+        description: 'Extra project-specific instructions'
+        type: string
+        default: ''
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  implement:
+    runs-on: self-hosted
+    timeout-minutes: 60
+
+    concurrency:
+      group: claude-dev-${{ github.event.issue.number }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Check if already implemented
+        id: check-existing
+        run: |
+          EXISTING_PR=$(gh pr list --search "head:claude/issue-$ISSUE_NUMBER" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+          EXISTING_BRANCH=$(git ls-remote --heads "https://github.com/$REPO.git" "claude/issue-$ISSUE_NUMBER*" 2>/dev/null | head -1 | awk '{print $2}' | sed 's|refs/heads/||')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ PR #$EXISTING_PR existe deja. Label retire."
+            gh issue edit "$ISSUE_NUMBER" --remove-label "plan-approved" 2>/dev/null || true
+          elif [ -n "$EXISTING_BRANCH" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            gh issue comment "$ISSUE_NUMBER" --body "ℹ️ Branche \`$EXISTING_BRANCH\` existe. Creez une PR ou supprimez-la."
+            gh issue edit "$ISSUE_NUMBER" --remove-label "plan-approved" 2>/dev/null || true
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+
+      - name: Remove plan-to-review label
+        if: steps.check-existing.outputs.skip != 'true'
+        run: gh issue edit "$ISSUE_NUMBER" --remove-label "plan-to-review" 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+
+      - name: Checkout repository
+        if: steps.check-existing.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        if: steps.check-existing.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: steps.check-existing.outputs.skip != 'true'
+        run: ${{ inputs.install_command }}
+
+      - name: Discover project docs
+        if: steps.check-existing.outputs.skip != 'true'
+        id: docs
+        run: |
+          INSTRUCTIONS=""
+          for f in CLAUDE*.md; do
+            [ -f "$f" ] && INSTRUCTIONS="${INSTRUCTIONS}\n- \`$f\`"
+          done
+          echo "read_list<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$INSTRUCTIONS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Fetch plan from issue comments
+        if: steps.check-existing.outputs.skip != 'true'
+        run: |
+          PLAN_CONTENT=$(gh issue view "$ISSUE_NUMBER" --json comments --jq '
+            .comments | map(select(.body | contains("PLAN-START"))) | last | .body // empty
+          ')
+          if [ -z "$PLAN_CONTENT" ]; then
+            echo "::error::Aucun plan trouve dans les commentaires de l'issue #$ISSUE_NUMBER."
+            exit 1
+          fi
+          echo "$PLAN_CONTENT" > PLAN.md
+
+          TEST_PLAN=$(echo "$PLAN_CONTENT" | sed -n '/<!-- TEST-PLAN-START -->/,/<!-- TEST-PLAN-END -->/p' | sed '1d;$d')
+          [ -n "$TEST_PLAN" ] && echo "$TEST_PLAN" > TEST-PLAN.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+
+      # Note: issue title/body used in prompt: input (action parameter, not shell)
+      - name: Implement with Claude
+        if: steps.check-existing.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "makeplane[bot]"
+          branch_name_template: "claude/issue-{{entityNumber}}"
+          base_branch: ${{ inputs.base_branch }}
+          track_progress: "true"
+          prompt: |
+            Tu es un developpeur senior. Implemente le plan dans PLAN.md avec rigueur.
+
+            ## Issue #${{ github.event.issue.number }} : ${{ github.event.issue.title }}
+
+            ## Phase 1 — PREPARATION
+
+            Lis OBLIGATOIREMENT :
+            1. `PLAN.md` — Le plan d'implementation a suivre
+            2. Fichiers CLAUDE*.md a la racine :
+            ${{ steps.docs.outputs.read_list }}
+
+            Identifie les taches et leurs dependances. Regroupe-les en **vagues** :
+            - Vague 1 : taches sans dependances (executables en premier)
+            - Vague 2 : taches dependant de la vague 1
+            - etc.
+
+            ## Phase 2 — EXECUTION PAR VAGUES
+
+            Pour CHAQUE tache, dans l'ordre des vagues :
+
+            ### 2a. Contexte frais
+            Relis les fichiers concernes AVANT chaque tache (ne te fie pas a ta memoire des fichiers lus plus tot).
+
+            ### 2b. Implementation
+            Implemente exactement ce que la tache demande. Ni plus, ni moins.
+
+            ### 2c. Commit atomique
+            UN commit par tache, format conventionnel :
+            - `feat(scope): description` — nouvelle fonctionnalite
+            - `fix(scope): description` — correction de bug
+            - `refactor(scope): description` — refactoring
+
+            ### 2d. Verification du done criteria
+            Execute la commande `done_criteria` de la tache (si presente dans PLAN.md).
+            Si ca echoue : corrige AVANT de passer a la tache suivante.
+
+            ## Phase 3 — VALIDATION FINALE (BLOQUANTE)
+
+            NE JAMAIS POUSSER DU CODE QUI NE COMPILE PAS.
+
+            1. `${{ inputs.lint_command }}` — corrige jusqu'a 0 erreurs
+            2. `${{ inputs.typecheck_command }}` — corrige jusqu'a 0 erreurs
+            3. Relance les deux pour CONFIRMER 0 erreurs
+            4. Supprime PLAN.md et TEST-PLAN.md
+
+            ## Phase 4 — VERIFICATION POST-EXECUTION
+
+            Relis l'issue originale et verifie :
+            - [ ] Chaque critere d'acceptation est adresse par au moins un commit
+            - [ ] Aucune regression visible (fichiers modifies coherents)
+            - [ ] Les tests du plan de test (TEST-PLAN.md) passent si applicable
+
+            Si un critere n'est PAS couvert, implemente-le maintenant.
+
+            ${{ inputs.extra_prompt }}
+
+            ## Regles STRICTES
+            - Suis le plan EXACTEMENT — 1 commit par tache, pas de mega-commit
+            - Relis les fichiers avant chaque tache (contexte frais)
+            - Conventions du projet (CLAUDE.md)
+            - Pas de console.log en production
+            - Types stricts, pas de `any`
+            - Si bloque sur une tache : documente le probleme dans un commentaire issue et continue
+
+          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+
+      - name: Lint fix (safety net)
+        if: steps.check-existing.outputs.skip != 'true'
+        run: ${{ inputs.lint_command }}
+        continue-on-error: true
+
+      - name: Check types (safety net)
+        if: steps.check-existing.outputs.skip != 'true'
+        run: ${{ inputs.typecheck_command }}
+
+      - name: Commit lint fixes if any
+        if: steps.check-existing.outputs.skip != 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "chore: auto-fix lint issues"
+            git push -u origin HEAD
+          fi
+
+      - name: Create PR
+        if: steps.check-existing.outputs.skip != 'true'
+        run: |
+          IMPL_BRANCH="claude/issue-$ISSUE_NUMBER"
+          EXISTING_PR=$(gh pr list --head "$IMPL_BRANCH" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #$EXISTING_PR already exists"
+            exit 0
+          fi
+
+          TEST_PLAN_CONTENT="- [ ] Verify the fix\n- [ ] Check types\n- [ ] Review code"
+          [ -f TEST-PLAN.md ] && TEST_PLAN_CONTENT=$(cat TEST-PLAN.md)
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$IMPL_BRANCH" \
+            --title "fix: $ISSUE_TITLE (#$ISSUE_NUMBER)" \
+            --body "$(cat <<PREOF
+          ## Summary
+          Closes #$ISSUE_NUMBER — Implementation from approved plan.
+
+          ## Test plan
+          $TEST_PLAN_CONTENT
+
+          Generated with [Claude Code](https://claude.com/claude-code)
+          PREOF
+          )"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+
+      - name: Swap labels on success
+        if: success() && steps.check-existing.outputs.skip != 'true'
+        run: |
+          gh label create "review-ready" --color "0e8a16" --description "PR prete pour revue" 2>/dev/null || true
+          gh issue edit "$ISSUE_NUMBER" \
+            --add-label "review-ready" \
+            --remove-label "plan-approved" \
+            --remove-label "plan-to-review"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+
+      - name: Handle failure
+        if: failure() && steps.check-existing.outputs.skip != 'true'
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "⚠️ **Echec implementation** — [Logs]($RUN_URL). Label retire, remettez-le pour reessayer."
+          gh issue edit "$ISSUE_NUMBER" --remove-label "plan-approved" 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

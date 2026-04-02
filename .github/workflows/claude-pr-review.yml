@@ -1,0 +1,209 @@
+name: Claude PR Review (Reusable)
+
+# SECURITY REVIEW:
+# - github.head_ref is used in env: var HEAD_REF (safe, not shell-interpolated)
+# - github.event.pull_request.number is used in prompt: input (safe, action param)
+#   and in env: vars (safe)
+# - No untrusted input is used directly in run: blocks
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        type: string
+        required: true
+      model:
+        type: string
+        default: 'claude-sonnet-4-6'
+      max_turns:
+        type: number
+        default: 15
+      extra_review_rules:
+        description: 'Extra project-specific review rules'
+        type: string
+        default: ''
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  review:
+    runs-on: self-hosted
+    timeout-minutes: 15
+    concurrency:
+      group: claude-pr-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Get changed files
+        id: changes
+        run: |
+          FILES=$(gh pr diff "$PR_NUMBER" --name-only)
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          CODE_FILES=$(echo "$FILES" | grep -vE '\.(md|yml|yaml|json|txt)$' || true)
+          [ -z "$CODE_FILES" ] && echo "skip=true" >> $GITHUB_OUTPUT || echo "skip=false" >> $GITHUB_OUTPUT
+          echo "$FILES" | grep -q 'supabase/migrations/' 2>/dev/null \
+            && echo "has_migration=true" >> $GITHUB_OUTPUT \
+            || echo "has_migration=false" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Detect linked issue
+        id: issue
+        if: steps.changes.outputs.skip != 'true'
+        run: |
+          PR_BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body // ""')
+          ISSUE_NUM=""
+          if [[ "$HEAD_REF" =~ ^claude/issue-([0-9]+) ]]; then
+            ISSUE_NUM="${BASH_REMATCH[1]}"
+          fi
+          if [ -z "$ISSUE_NUM" ] && [ -n "$PR_BODY" ]; then
+            ISSUE_NUM=$(echo "$PR_BODY" | grep -oP '(?:Closes|Fixes|Resolves)\s*#(\d+)' | head -1 | grep -oP '\d+' || true)
+          fi
+          if [ -n "$ISSUE_NUM" ]; then
+            echo "has_issue=true" >> $GITHUB_OUTPUT
+            echo "number=$ISSUE_NUM" >> $GITHUB_OUTPUT
+            ISSUE_DATA=$(gh issue view "$ISSUE_NUM" --json title,body -q '.' 2>/dev/null || echo "")
+            [ -n "$ISSUE_DATA" ] && { echo "data<<EOF" >> $GITHUB_OUTPUT; echo "$ISSUE_DATA" >> $GITHUB_OUTPUT; echo "EOF" >> $GITHUB_OUTPUT; }
+            TEST_PLAN=$(gh issue view "$ISSUE_NUM" --json comments --jq '
+              .comments | map(select(.body | contains("TEST-PLAN-START"))) | last | .body // empty
+            ' 2>/dev/null | sed -n '/<!-- TEST-PLAN-START -->/,/<!-- TEST-PLAN-END -->/p' | sed '1d;$d')
+            [ -n "$TEST_PLAN" ] && { echo "has_test_plan=true" >> $GITHUB_OUTPUT; echo "test_plan<<EOF" >> $GITHUB_OUTPUT; echo "$TEST_PLAN" >> $GITHUB_OUTPUT; echo "EOF" >> $GITHUB_OUTPUT; } || echo "has_test_plan=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_issue=false" >> $GITHUB_OUTPUT
+            echo "has_test_plan=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+
+      - name: Discover docs
+        if: steps.changes.outputs.skip != 'true'
+        id: docs
+        run: |
+          INSTRUCTIONS=""
+          for f in CLAUDE*.md; do [ -f "$f" ] && INSTRUCTIONS="${INSTRUCTIONS}\n- \`$f\`"; done
+          echo "read_list<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$INSTRUCTIONS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Claude review
+        if: steps.changes.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "makeplane[bot]"
+          prompt: |
+            Review rigoureuse de la PR #${{ github.event.pull_request.number }} du projet ${{ inputs.project_name }}.
+
+            ## Fichiers modifies
+            ```
+            ${{ steps.changes.outputs.files }}
+            ```
+
+            ## Phase 1 — COLLECTE
+
+            1. `gh pr diff ${{ github.event.pull_request.number }}` — lire le diff complet
+            2. `gh pr view ${{ github.event.pull_request.number }}` — contexte PR
+            3. Lis les fichiers CLAUDE*.md pertinents :
+            ${{ steps.docs.outputs.read_list }}
+            4. Pour les fichiers complexes, Read le fichier entier pour comprendre le contexte
+
+            ## Phase 2 — REVIEW MULTI-AXES
+
+            Evalue chaque axe avec un verdict (✅ OK / ⚠️ Mineur / ❌ Bloquant) :
+
+            **Code Quality**
+            - Types stricts (pas de `any` non justifie)
+            - Gestion d'erreurs adequate
+            - Pas de console.log en production
+            - Nommage clair et coherent
+
+            **Securite**
+            - Pas d'injection (SQL, XSS, commandes)
+            - Pas de secrets en dur
+            - RLS respecte (si Supabase)
+            - Validation des inputs aux frontieres
+
+            **Architecture**
+            - Respect des patterns existants (CLAUDE.md)
+            - Pas de duplication (code existant reutilise)
+            - Structure coherente avec le reste du projet
+            - Pas de sur-engineering
+
+            **Performance**
+            - Pas de requetes N+1
+            - Rendu cote serveur quand possible
+            - Pas de re-renders inutiles
+
+            ${{ steps.changes.outputs.has_migration == 'true' && '**Migrations DB**\n- Fichier local present avec nommage YYYYMMDD\n- Retrocompatibilite des params\n- Rollback possible' || '' }}
+
+            ${{ inputs.extra_review_rules }}
+
+            ## Phase 3 — VERIFICATION CRITERES D'ACCEPTATION
+
+            ${{ steps.issue.outputs.has_issue == 'true' && format('Issue liee : #{0}\n{1}\n\nPour CHAQUE critere d''acceptation de l''issue, verifie dans le diff :\n- COUVERT : le critere est implemente et fonctionne\n- PARTIEL : partiellement implemente\n- MANQUANT : pas du tout adresse\n- NON APPLICABLE : ne concerne pas cette PR', steps.issue.outputs.number, steps.issue.outputs.data) || 'Pas d''issue liee detectee.' }}
+
+            ## Phase 4 — VALIDATION PLAN DE TEST
+
+            ${{ steps.issue.outputs.has_test_plan == 'true' && format('Plan de test (du plan approuve) :\n{0}\n\nPour CHAQUE scenario, verifie dans le code :\n- VERIFIE : le scenario est couvert par le code\n- NON VERIFIE : le code ne couvre pas ce cas\n- NON APPLICABLE : scenario non pertinent pour cette PR', steps.issue.outputs.test_plan) || 'Pas de plan de test structure trouve.' }}
+
+            ## Phase 5 — VERDICT ET RECOMMANDATION
+
+            Determine un verdict global :
+            - **APPROVE** : 0 bloquants, criteres couverts, plan de test valide
+            - **CORRECTIONS MINEURES** : ⚠️ uniquement, rien de bloquant
+            - **CORRECTIONS REQUISES** : ❌ au moins 1 bloquant OU critere manquant
+            - **REPLANIFICATION** : le code devie significativement du plan → necesssite un retour a la phase plan
+
+            ## FORMAT — UN SEUL commentaire via `gh pr comment`
+
+            ```markdown
+            ## 🔍 Review — PR #${{ github.event.pull_request.number }}
+
+            ### Resume
+            [2-3 phrases]
+
+            ### Review
+            | Axe | Verdict | Remarques |
+            |-----|---------|-----------|
+            | Code | ✅/⚠️/❌ | ... |
+            | Securite | ✅/⚠️/❌ | ... |
+            | Architecture | ✅/⚠️/❌ | ... |
+            | Performance | ✅/⚠️/❌ | ... |
+
+            [Details des problemes avec fichier:ligne et suggestion de fix]
+
+            ### Criteres d'acceptation
+            | # | Critere | Statut |
+            |---|---------|--------|
+            | 1 | ... | COUVERT/PARTIEL/MANQUANT |
+            **Score : X/Y**
+
+            ### Plan de test
+            | # | Scenario | Statut |
+            |---|----------|--------|
+            | 1 | ... | VERIFIE/NON VERIFIE |
+            **Score : X/Y**
+
+            ### Verdict : [APPROVE / CORRECTIONS MINEURES / CORRECTIONS REQUISES / REPLANIFICATION]
+            [Justification + actions requises si applicable]
+            ```
+
+          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
