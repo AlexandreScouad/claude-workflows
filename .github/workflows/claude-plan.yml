@@ -241,9 +241,11 @@ jobs:
             --jq '[.labels[].name] | map(ascii_downcase) | map(select(. == "bug")) | length')
 
           if [ "$IS_BUG" = "0" ]; then
+            echo "is_bug=false" >> "$GITHUB_OUTPUT"
             echo "reason=not_a_bug" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "is_bug=true" >> "$GITHUB_OUTPUT"
 
           CONFIDENCE_JSON=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
             --jq '.comments | map(select(.body | contains("PLAN-CONFIDENCE"))) | last | .body // ""' \
@@ -287,9 +289,16 @@ jobs:
             gh label create "plan-to-review" --color "fbca04" --description "Plan pret pour revue" 2>/dev/null || true
             gh issue edit "$ISSUE_NUMBER" --add-label "plan-to-review"
           fi
+
+          # Non-bugs: chain estimate workflow automatically
+          if [ "$IS_BUG" = "false" ]; then
+            gh label create "estimate-ready" --color "3B82F6" --description "Pret pour estimation" 2>/dev/null || true
+            gh issue edit "$ISSUE_NUMBER" --add-label "estimate-ready"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           AUTO_APPROVE: ${{ steps.confidence.outputs.auto_approve }}
           SCORE: ${{ steps.confidence.outputs.score }}
           FACTORS: ${{ steps.confidence.outputs.factors }}
+          IS_BUG: ${{ steps.confidence.outputs.is_bug }}
