@@ -8,7 +8,7 @@ on:
 jobs:
   implement:
     if: github.event.label.name == 'plan-approved'
-    uses: scouad/claude-workflows/.github/workflows/claude-dev.yml@main
+    uses: scouad/claude-workflows/.github/workflows/claude-dev.yml@v1
     with:
       base_branch: recette
       project_name: mon-projet
@@ -16,6 +16,8 @@ jobs:
       # install_command: 'npm ci'           # default
       # lint_command: 'npm run lint:fix'     # default
       # typecheck_command: 'npm run check-types'  # default
+      # plane_plan_field_name: 'plan de correction'  # default (Plane custom field)
+      # plane_test_field_name: 'plan de test'        # default
       # extra_prompt: |
       #   - Workflow RPC : SEARCH → REUSE → ADAPT → CREATE
       #   - Messages d'erreur en francais

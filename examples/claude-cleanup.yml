@@ -1,0 +1,12 @@
+# Example caller workflow — copy to your project's .github/workflows/
+name: Claude Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cleanup:
+    if: github.event.pull_request.merged == true && startsWith(github.head_ref, 'claude/issue-')
+    uses: scouad/claude-workflows/.github/workflows/claude-cleanup.yml@v1
+    secrets: inherit

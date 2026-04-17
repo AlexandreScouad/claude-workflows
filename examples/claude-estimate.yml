@@ -8,7 +8,7 @@ on:
 jobs:
   estimate:
     if: github.event.label.name == 'estimate-ready'
-    uses: scouad/claude-workflows/.github/workflows/claude-estimate.yml@main
+    uses: scouad/claude-workflows/.github/workflows/claude-estimate.yml@v1
     with:
       base_branch: recette
       project_name: mon-projet
@@ -17,7 +17,7 @@ jobs:
 
   sync:
     if: github.event.label.name == 'estimate-approved'
-    uses: scouad/claude-workflows/.github/workflows/claude-estimate.yml@main
+    uses: scouad/claude-workflows/.github/workflows/claude-estimate.yml@v1
     with:
       base_branch: recette
       project_name: mon-projet

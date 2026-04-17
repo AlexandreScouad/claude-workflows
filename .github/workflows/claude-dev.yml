@@ -1,5 +1,11 @@
 name: Claude Dev (Reusable)
 
+# SECURITY REVIEW:
+# - github.event.issue.title is used in env: vars (safe, not shell-interpolated)
+# - github.event.issue.number is used in prompt: input (safe, action param)
+#   and in env: vars (safe)
+# - No untrusted input is used directly in run: blocks
+
 on:
   workflow_call:
     inputs:
@@ -39,9 +45,19 @@ on:
         description: 'Extra project-specific instructions'
         type: string
         default: ''
+      plane_plan_field_name:
+        description: 'Plane custom field name for the plan'
+        type: string
+        default: 'plan de correction'
+      plane_test_field_name:
+        description: 'Plane custom field name for the test plan'
+        type: string
+        default: 'plan de test'
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
+      PLANE_API_TOKEN:
+        required: false
 
 jobs:
   implement:
@@ -118,25 +134,115 @@ jobs:
           echo -e "$INSTRUCTIONS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Fetch plan from issue comments
+      # ── Plane integration (optional) ──
+      - name: Resolve Plane work item
         if: steps.check-existing.outputs.skip != 'true'
+        id: plane-resolve
+        continue-on-error: true
+        env:
+          PLANE_API_TOKEN: ${{ secrets.PLANE_API_TOKEN }}
+          PLANE_BASE_URL: ${{ vars.PLANE_BASE_URL }}
+          PLANE_WORKSPACE: ${{ vars.PLANE_WORKSPACE }}
+          PLANE_PROJECT_ID: ${{ vars.PLANE_PROJECT_ID }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PLAN_FIELD_NAME: ${{ inputs.plane_plan_field_name }}
+          TEST_FIELD_NAME: ${{ inputs.plane_test_field_name }}
         run: |
-          PLAN_CONTENT=$(gh issue view "$ISSUE_NUMBER" --json comments --jq '
-            .comments | map(select(.body | contains("PLAN-START"))) | last | .body // empty
-          ')
-          if [ -z "$PLAN_CONTENT" ]; then
-            echo "::error::Aucun plan trouve dans les commentaires de l'issue #$ISSUE_NUMBER."
-            exit 1
+          if [ -z "$PLANE_API_TOKEN" ] || [ -z "$PLANE_BASE_URL" ] || [ -z "$PLANE_WORKSPACE" ] || [ -z "$PLANE_PROJECT_ID" ]; then
+            echo "plane_available=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "$PLAN_CONTENT" > PLAN.md
 
-          TEST_PLAN=$(echo "$PLAN_CONTENT" | sed -n '/<!-- TEST-PLAN-START -->/,/<!-- TEST-PLAN-END -->/p' | sed '1d;$d')
-          [ -n "$TEST_PLAN" ] && echo "$TEST_PLAN" > TEST-PLAN.md
+          WI_RESPONSE=$(curl -sS -H "x-api-key: $PLANE_API_TOKEN" \
+            "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/issues/?external_source=github&external_id=$ISSUE_NUMBER")
+          WORK_ITEM_ID=$(echo "$WI_RESPONSE" | jq -r '.results[0].id // empty')
+          TYPE_ID=$(echo "$WI_RESPONSE" | jq -r '.results[0].type_id // .results[0].type // empty')
+
+          if [ -z "$WORK_ITEM_ID" ] || [ -z "$TYPE_ID" ]; then
+            echo "plane_available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PROPS_RESPONSE=$(curl -sS -H "x-api-key: $PLANE_API_TOKEN" \
+            "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-item-types/$TYPE_ID/work-item-properties/")
+
+          PLAN_FIELD_LOWER=$(echo "$PLAN_FIELD_NAME" | tr '[:upper:]' '[:lower:]')
+          TEST_FIELD_LOWER=$(echo "$TEST_FIELD_NAME" | tr '[:upper:]' '[:lower:]')
+
+          PLAN_PROP_ID=$(echo "$PROPS_RESPONSE" | jq -r --arg name "$PLAN_FIELD_LOWER" '
+            (if type == "array" then . else (.results // []) end)
+            | map(select(((.display_name // .name // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == $name))
+            | .[0].id // empty')
+          TEST_PROP_ID=$(echo "$PROPS_RESPONSE" | jq -r --arg name "$TEST_FIELD_LOWER" '
+            (if type == "array" then . else (.results // []) end)
+            | map(select(((.display_name // .name // "") | ascii_downcase | gsub("^\\s+|\\s+$"; "")) == $name))
+            | .[0].id // empty')
+
+          echo "plane_available=true" >> "$GITHUB_OUTPUT"
+          echo "work_item_id=$WORK_ITEM_ID" >> "$GITHUB_OUTPUT"
+          echo "plan_prop_id=$PLAN_PROP_ID" >> "$GITHUB_OUTPUT"
+          echo "test_prop_id=$TEST_PROP_ID" >> "$GITHUB_OUTPUT"
+
+      # ── Fetch plan (Plane first, then GitHub comments) ──
+      - name: Fetch plan
+        if: steps.check-existing.outputs.skip != 'true'
+        id: plan
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLANE_API_TOKEN: ${{ secrets.PLANE_API_TOKEN }}
+          PLANE_BASE_URL: ${{ vars.PLANE_BASE_URL }}
+          PLANE_WORKSPACE: ${{ vars.PLANE_WORKSPACE }}
+          PLANE_PROJECT_ID: ${{ vars.PLANE_PROJECT_ID }}
+          PLANE_AVAILABLE: ${{ steps.plane-resolve.outputs.plane_available }}
+          WORK_ITEM_ID: ${{ steps.plane-resolve.outputs.work_item_id }}
+          PLAN_PROP_ID: ${{ steps.plane-resolve.outputs.plan_prop_id }}
+          TEST_PROP_ID: ${{ steps.plane-resolve.outputs.test_prop_id }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set +e
+          PLAN_SOURCE=""
 
-      # Note: issue title/body used in prompt: input (action parameter, not shell)
+          # Priority 1: Plane custom fields
+          if [ "$PLANE_AVAILABLE" = "true" ] && [ -n "$PLAN_PROP_ID" ]; then
+            PLAN_VALUE=$(curl -sS -H "x-api-key: $PLANE_API_TOKEN" \
+              "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-items/$WORK_ITEM_ID/work-item-properties/$PLAN_PROP_ID/values/" \
+              | jq -r '.value // empty')
+            if [ -n "$PLAN_VALUE" ] && [ "$PLAN_VALUE" != "null" ]; then
+              printf '%s' "$PLAN_VALUE" > PLAN.md
+              PLAN_SOURCE="plane"
+            fi
+            if [ "$PLAN_SOURCE" = "plane" ] && [ -n "$TEST_PROP_ID" ]; then
+              TEST_VALUE=$(curl -sS -H "x-api-key: $PLANE_API_TOKEN" \
+                "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-items/$WORK_ITEM_ID/work-item-properties/$TEST_PROP_ID/values/" \
+                | jq -r '.value // empty')
+              if [ -n "$TEST_VALUE" ] && [ "$TEST_VALUE" != "null" ]; then
+                printf '%s' "$TEST_VALUE" > TEST-PLAN.md
+              fi
+            fi
+          fi
+
+          # Priority 2: GitHub issue comments
+          if [ "$PLAN_SOURCE" != "plane" ]; then
+            echo "::notice::Fetching plan from GitHub comments"
+            PLAN_CONTENT=$(gh issue view "$ISSUE_NUMBER" --json comments --jq '
+              .comments | map(select(.body | contains("PLAN-START") or contains("Plan d'\''implementation"))) | last | .body // empty
+            ')
+            if [ -z "$PLAN_CONTENT" ]; then
+              echo "::error::No plan found in issue #$ISSUE_NUMBER comments."
+              exit 1
+            fi
+            printf '%s' "$PLAN_CONTENT" > PLAN.md
+            PLAN_SOURCE="comments"
+            TEST_PLAN=$(printf '%s' "$PLAN_CONTENT" | sed -n '/<!-- TEST-PLAN-START -->/,/<!-- TEST-PLAN-END -->/p' | sed '1d;$d')
+            if [ -n "$TEST_PLAN" ]; then
+              printf '%s' "$TEST_PLAN" > TEST-PLAN.md
+            fi
+          fi
+
+          echo "source=$PLAN_SOURCE" >> "$GITHUB_OUTPUT"
+
+      # ── Implement with Claude ──
+      # Note: issue title used in prompt: input (action parameter, not shell)
       - name: Implement with Claude
         if: steps.check-existing.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1

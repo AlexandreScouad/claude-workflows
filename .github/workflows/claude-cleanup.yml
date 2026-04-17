@@ -1,0 +1,27 @@
+name: Claude Branch Cleanup (Reusable)
+
+# SECURITY REVIEW:
+# - github.head_ref is used in env: var BRANCH (safe, not shell-interpolated)
+
+on:
+  workflow_call: {}
+
+jobs:
+  cleanup:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    concurrency:
+      group: cleanup-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: write
+
+    steps:
+      - name: Delete merged branch
+        run: |
+          echo "Deleting branch: $BRANCH"
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref }}

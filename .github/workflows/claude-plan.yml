@@ -1,5 +1,10 @@
 name: Claude Plan (Reusable)
 
+# SECURITY REVIEW:
+# - github.event.issue.title/body are used in prompt: input (safe, action param)
+#   and in env: vars (safe, not shell-interpolated)
+# - No untrusted input is used directly in run: blocks
+
 on:
   workflow_call:
     inputs:
@@ -27,9 +32,19 @@ on:
         description: 'Extra project-specific instructions appended to the prompt'
         type: string
         default: ''
+      plane_plan_field_name:
+        description: 'Plane custom field name for the plan (empty = disable Plane)'
+        type: string
+        default: 'plan de correction'
+      plane_test_field_name:
+        description: 'Plane custom field name for the test plan'
+        type: string
+        default: 'plan de test'
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
+      PLANE_API_TOKEN:
+        required: false
 
 jobs:
   generate-plan:
@@ -82,9 +97,75 @@ jobs:
           echo -e "$INSTRUCTIONS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # Note: github.event.issue.title and .body are used in the 'prompt' input
-      # of claude-code-action, NOT in a shell run: block. This is safe — action
-      # inputs are passed as strings, not interpolated by the shell.
+      # ── Plane integration (optional) ──
+      # Resolves the Plane work item linked to this GitHub issue and finds
+      # the IDs of custom fields for plan and test plan storage.
+      # Falls back to GitHub comment mode if Plane is not configured.
+      - name: Resolve Plane work item
+        if: steps.check-approved.outputs.skip != 'true'
+        id: plane-resolve
+        continue-on-error: true
+        env:
+          PLANE_API_TOKEN: ${{ secrets.PLANE_API_TOKEN }}
+          PLANE_BASE_URL: ${{ vars.PLANE_BASE_URL }}
+          PLANE_WORKSPACE: ${{ vars.PLANE_WORKSPACE }}
+          PLANE_PROJECT_ID: ${{ vars.PLANE_PROJECT_ID }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PLAN_FIELD_NAME: ${{ inputs.plane_plan_field_name }}
+          TEST_FIELD_NAME: ${{ inputs.plane_test_field_name }}
+        run: |
+          if [ -z "$PLANE_API_TOKEN" ] || [ -z "$PLANE_BASE_URL" ] || [ -z "$PLANE_WORKSPACE" ] || [ -z "$PLANE_PROJECT_ID" ]; then
+            echo "plane_available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Plane not configured — using GitHub comments"
+            exit 0
+          fi
+
+          WI_RESPONSE=$(curl -sS -H "x-api-key: $PLANE_API_TOKEN" \
+            "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/issues/?external_source=github&external_id=$ISSUE_NUMBER")
+          WORK_ITEM_ID=$(echo "$WI_RESPONSE" | jq -r '.results[0].id // empty')
+          TYPE_ID=$(echo "$WI_RESPONSE" | jq -r '.results[0].type_id // .results[0].type // empty')
+
+          if [ -z "$WORK_ITEM_ID" ] || [ -z "$TYPE_ID" ]; then
+            echo "plane_available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Plane work item not found for issue #$ISSUE_NUMBER — fallback to comments"
+            exit 0
+          fi
+
+          PROPS_RESPONSE=$(curl -sS -H "x-api-key: $PLANE_API_TOKEN" \
+            "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-item-types/$TYPE_ID/work-item-properties/")
+
+          PLAN_FIELD_LOWER=$(echo "$PLAN_FIELD_NAME" | tr '[:upper:]' '[:lower:]')
+          TEST_FIELD_LOWER=$(echo "$TEST_FIELD_NAME" | tr '[:upper:]' '[:lower:]')
+
+          PLAN_PROP_ID=$(echo "$PROPS_RESPONSE" | jq -r --arg name "$PLAN_FIELD_LOWER" '
+            (if type == "array" then . else (.results // []) end)
+            | map(select(
+                ((.display_name // .name // "") | ascii_downcase | gsub("^\\s+|\\s+$"; ""))
+                == $name
+              ))
+            | .[0].id // empty')
+          TEST_PROP_ID=$(echo "$PROPS_RESPONSE" | jq -r --arg name "$TEST_FIELD_LOWER" '
+            (if type == "array" then . else (.results // []) end)
+            | map(select(
+                ((.display_name // .name // "") | ascii_downcase | gsub("^\\s+|\\s+$"; ""))
+                == $name
+              ))
+            | .[0].id // empty')
+
+          if [ -z "$PLAN_PROP_ID" ]; then
+            echo "plane_available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Custom field '$PLAN_FIELD_NAME' not found — fallback to comments"
+            exit 0
+          fi
+
+          echo "plane_available=true" >> "$GITHUB_OUTPUT"
+          echo "work_item_id=$WORK_ITEM_ID" >> "$GITHUB_OUTPUT"
+          echo "type_id=$TYPE_ID" >> "$GITHUB_OUTPUT"
+          echo "plan_prop_id=$PLAN_PROP_ID" >> "$GITHUB_OUTPUT"
+          echo "test_prop_id=$TEST_PROP_ID" >> "$GITHUB_OUTPUT"
+
+      # ── Generate plan with Claude ──
+      # Note: issue title/body are used in prompt: input (action parameter, not shell)
       - name: Generate plan with Claude
         if: steps.check-approved.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
@@ -92,19 +173,63 @@ jobs:
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_BODY: ${{ github.event.issue.body }}
+          PLANE_AVAILABLE: ${{ steps.plane-resolve.outputs.plane_available }}
+          PLANE_API_TOKEN: ${{ secrets.PLANE_API_TOKEN }}
+          PLANE_BASE_URL: ${{ vars.PLANE_BASE_URL }}
+          PLANE_WORKSPACE: ${{ vars.PLANE_WORKSPACE }}
+          PLANE_PROJECT_ID: ${{ vars.PLANE_PROJECT_ID }}
+          PLANE_WORK_ITEM_ID: ${{ steps.plane-resolve.outputs.work_item_id }}
+          PLANE_PLAN_PROP_ID: ${{ steps.plane-resolve.outputs.plan_prop_id }}
+          PLANE_TEST_PROP_ID: ${{ steps.plane-resolve.outputs.test_prop_id }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
-          allowed_tools: "Glob,Grep,Read,Bash(git log *),Bash(git diff *),Bash(ls *)"
+          allowed_tools: "Glob,Grep,Read,Write,Bash(git log *),Bash(git diff *),Bash(ls *),Bash(cat *),Bash(echo *),Bash(printf *),Bash(curl *)"
           track_progress: "true"
           prompt: |
             Tu es un architecte logiciel senior. Produis un plan d'implementation detaille.
-            Ta reponse sera postee comme commentaire sur l'issue — NE CREE AUCUN FICHIER.
 
             ## Issue #${{ github.event.issue.number }}
             **Titre** : ${{ github.event.issue.title }}
             **Description** :
             ${{ github.event.issue.body }}
+
+            ## Stockage du plan
+
+            `$PLANE_AVAILABLE` indique si Plane est connecte.
+
+            **Cas A (`$PLANE_AVAILABLE == "true"`)** :
+            1. Ecris `PLAN.md` (markdown propre, sans balises HTML)
+            2. Ecris `TEST-PLAN.md` (tableau scenarios + verifications)
+            3. Ecris `plan-confidence.json` (voir format ci-bas)
+            4. Pousse le plan vers Plane avec cette commande curl :
+               ```bash
+               curl -sS -X POST \
+                 -H "x-api-key: $PLANE_API_TOKEN" \
+                 -H "Content-Type: application/json" \
+                 -d "$(jq -Rs '{value: .}' < PLAN.md)" \
+                 "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-items/$PLANE_WORK_ITEM_ID/work-item-properties/$PLANE_PLAN_PROP_ID/values/"
+               ```
+               Si `$PLANE_TEST_PROP_ID` est non vide, fais pareil pour TEST-PLAN.md avec ce prop ID.
+            5. Reponds uniquement : `✅ Plan ecrit dans Plane (work item $PLANE_WORK_ITEM_ID).`
+               NE repete PAS le plan dans ta reponse.
+
+            **Cas B (`$PLANE_AVAILABLE != "true"`)** :
+            Ta reponse sera postee comme commentaire sur l'issue — NE CREE AUCUN FICHIER.
+            Mets tout dans ta reponse avec ce format :
+            ```
+            🔽 PLAN-START 🔽
+            <details><summary>📋 Plan — Issue #${{ github.event.issue.number }}</summary>
+            [plan markdown complet]
+            <!-- TEST-PLAN-START -->
+            [plan de test]
+            <!-- TEST-PLAN-END -->
+            </details>
+            🔼 PLAN-END 🔼
+            ---
+            *Ajoutez le label `plan-approved` pour lancer l'implementation.*
+            <!-- PLAN-CONFIDENCE: {...} -->
+            ```
 
             ## Phase 1 — RECHERCHE
 
@@ -115,6 +240,7 @@ jobs:
                - Identifie les fichiers impactes et les patterns existants
                - Cherche des implementations similaires a reutiliser (SEARCH → REUSE → ADAPT → CREATE)
                - Comprends les types, interfaces et contrats existants
+               - Budget : ≤15 tours d'exploration. Ne lis que les fichiers directement lies.
 
             ## Phase 2 — ANALYSE
 
@@ -128,107 +254,55 @@ jobs:
             Decompose en **taches atomiques**. Chaque tache DOIT etre :
             - Independamment committable (un commit = une tache)
             - Testable avec une commande de verification concrete
-            - Scopee a 1-3 fichiers max (tient dans un contexte frais)
+            - Scopee a 1-3 fichiers max
 
-            ## Phase 4 — VERIFICATION DU PLAN (Plan Checker GSD)
+            Structure du plan :
+            ```markdown
+            # Plan d'implementation — Issue #N
+            ## Resume (1-2 phrases)
+            ## Fichiers impactes (tableau : Fichier | Action | Description)
+            ## Taches (checklist avec fichiers, instructions precises, done criteria)
+            ## Risques et mitigations
+            ## Plan de test (tableau : # | Scenario | Type | Criticite | Verification)
+            ```
 
-            Avant de poster, verifie ton plan sur ces **8 dimensions** :
+            ## Phase 4 — VERIFICATION (8 dimensions)
 
-            | # | Dimension | Question | Passe ? |
-            |---|-----------|----------|---------|
-            | 1 | **Couverture requirements** | Chaque critere d'acceptation est adresse par au moins 1 tache ? | |
-            | 2 | **Atomicite** | Chaque tache = 1 commit independant, 1-3 fichiers ? | |
-            | 3 | **Ordre des dependances** | Les taches dependantes viennent apres leurs pre-requis ? | |
-            | 4 | **Scope fichiers** | Pas de chevauchement excessif entre taches ? | |
-            | 5 | **Commandes de verification** | Chaque tache a un `done_criteria` verifiable (commande ou test) ? | |
-            | 6 | **Context fit** | Chaque tache tient dans un contexte frais de 200K tokens ? | |
-            | 7 | **Detection de gaps** | Aucune etape manquante entre l'etat actuel et le resultat ? | |
-            | 8 | **Testabilite (Nyquist)** | Le plan de test couvre les scenarios critiques ET les edge cases ? | |
+            Avant de poster, verifie :
+            | # | Dimension | Question |
+            |---|-----------|----------|
+            | 1 | Couverture requirements | Chaque critere couvert par au moins 1 tache ? |
+            | 2 | Atomicite | Chaque tache = 1 commit, 1-3 fichiers ? |
+            | 3 | Ordre dependances | Taches dependantes apres leurs pre-requis ? |
+            | 4 | Scope fichiers | Pas de chevauchement excessif ? |
+            | 5 | Commandes verification | Chaque tache a un done_criteria ? |
+            | 6 | Context fit | Chaque tache tient en contexte frais ? |
+            | 7 | Gaps | Aucune etape manquante ? |
+            | 8 | Testabilite | Plan de test couvre critiques + edge cases ? |
 
             Si une dimension echoue, REVISE le plan (max 3 iterations).
 
-            ## FORMAT DE SORTIE
+            ## Confiance (OBLIGATOIRE)
 
-            Commence EXACTEMENT par :
-            🔽 PLAN-START 🔽
-            <details>
-            <summary>📋 Plan d'implementation — Issue #${{ github.event.issue.number }}</summary>
+            8 axes (0-12.5pts chacun, total 0-100) :
+            requirement_coverage, task_atomicity, dependency_order, file_scope,
+            verification_commands, context_fit, gap_detection, testability.
 
-            # Plan d'implementation — Issue #${{ github.event.issue.number }}
+            auto_approve=true ssi score>=${{ inputs.auto_approve_threshold }} ET bug ET pas de migration risquee ET 8/8 dimensions vertes.
 
-            ## Resume
-            [1-2 phrases : solution choisie et approche]
-
-            ## Fichiers impactes
-            | Fichier | Action | Description |
-            |---------|--------|-------------|
-            | `path/file` | Modifier/Creer | Ce qui change |
-
-            ## Taches (atomiques, ordonnees)
-            - [ ] **Tache 1** : [Description precise]
-              - Fichiers : `file1`, `file2`
-              - Details : [Ce qu'il faut faire exactement]
-              - Done criteria : `commande ou verification`
-            - [ ] **Tache 2** : [Description]
-              - Depend de : Tache 1
-              - Fichiers : ...
-              - Done criteria : ...
-
-            ## Verification du plan (8 dimensions)
-            | Dimension | Statut | Note |
-            |-----------|--------|------|
-            | Couverture requirements | ✅/❌ | |
-            | Atomicite | ✅/❌ | |
-            | Ordre dependances | ✅/❌ | |
-            | Scope fichiers | ✅/❌ | |
-            | Commandes verification | ✅/❌ | |
-            | Context fit | ✅/❌ | |
-            | Gaps | ✅/❌ | |
-            | Testabilite | ✅/❌ | |
-
-            ## Risques et mitigations
-            - [Risque → mitigation]
-
-            ## Plan de test
-            <!-- TEST-PLAN-START -->
-            | # | Scenario | Type | Criticite | Commande/verification |
-            |---|----------|------|-----------|----------------------|
-            | 1 | [Scenario] | fonctionnel | critique | `commande` |
-            <!-- TEST-PLAN-END -->
-
-            Termine par :
-            </details>
-            🔼 PLAN-END 🔼
-            ---
-            *Ajoutez le label `plan-approved` pour lancer l'implementation.*
+            Cas A → `plan-confidence.json` : `{"score": N, "auto_approve": bool, "factors": {...}}`
+            Cas B → derniere ligne : `<!-- PLAN-CONFIDENCE: {"score": N, "auto_approve": bool, "factors": {...}} -->`
 
             ${{ inputs.extra_prompt }}
 
             ## Regles STRICTES
-            - NE CREE AUCUN FICHIER — le plan est dans ta reponse
             - Reference des fichiers REELS du codebase
-            - Chaque tache doit avoir un `done_criteria` verifiable
-            - Si le scope depasse 8 taches, decoupe en sous-issues
-
-            ## Evaluation de confiance (OBLIGATOIRE, commentaire HTML en fin de reponse)
-
-            8 axes (0-12.5pts chacun, total 0-100) :
-            - **requirement_coverage** : tous les criteres couverts ? (12.5=oui, 6=partiel, 0=non)
-            - **task_atomicity** : taches atomiques et committables ? (12.5=oui, 6=certaines trop larges)
-            - **dependency_order** : dependances correctes ? (12.5=oui, 6=ambigu)
-            - **file_scope** : pas de chevauchement excessif ? (12.5=clean, 6=overlap)
-            - **verification_commands** : done criteria verifiables ? (12.5=tous, 6=certains manquent)
-            - **context_fit** : taches tiennent en contexte frais ? (12.5=oui, 6=certaines larges)
-            - **gap_detection** : pas d'etapes manquantes ? (12.5=complet, 6=gaps mineurs)
-            - **testability** : plan de test couvre critiques + edge cases ? (12.5=oui, 6=partiel)
-
-            auto_approve=true si score>=${{ inputs.auto_approve_threshold }} ET bug ET pas de migration risquee ET 8/8 dimensions vertes.
-
-            Format (une seule ligne, commentaire HTML) :
-            <!-- PLAN-CONFIDENCE: {"score": N, "auto_approve": bool, "factors": {"requirement_coverage": N, "task_atomicity": N, "dependency_order": N, "file_scope": N, "verification_commands": N, "context_fit": N, "gap_detection": N, "testability": N}} -->
+            - Chaque tache a un done_criteria verifiable
+            - Si scope depasse 8 taches, decoupe en sous-issues
 
           claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
 
+      # ── Extract confidence score ──
       - name: Extract plan confidence
         if: success() && steps.check-approved.outputs.skip != 'true'
         id: confidence
@@ -247,9 +321,23 @@ jobs:
           fi
           echo "is_bug=true" >> "$GITHUB_OUTPUT"
 
-          CONFIDENCE_JSON=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-            --jq '.comments | map(select(.body | contains("PLAN-CONFIDENCE"))) | last | .body // ""' \
-            2>/dev/null | sed -n 's/.*<!-- PLAN-CONFIDENCE: \(.*\) -->.*/\1/p' | tail -1)
+          CONFIDENCE_JSON=""
+
+          # Priority 1: plan-confidence.json (Plane mode)
+          if [ "$PLANE_AVAILABLE" = "true" ] && [ -f plan-confidence.json ]; then
+            if jq empty plan-confidence.json 2>/dev/null; then
+              CONFIDENCE_JSON=$(cat plan-confidence.json)
+            else
+              echo "::warning::plan-confidence.json invalid — fallback to comments"
+            fi
+          fi
+
+          # Priority 2: HTML marker in issue comments
+          if [ -z "$CONFIDENCE_JSON" ]; then
+            CONFIDENCE_JSON=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
+              --jq '.comments | map(select(.body | contains("PLAN-CONFIDENCE"))) | last | .body // ""' \
+              2>/dev/null | sed -n 's/.*<!-- PLAN-CONFIDENCE: \(.*\) -->.*/\1/p' | tail -1)
+          fi
 
           if [ -z "$CONFIDENCE_JSON" ] || ! echo "$CONFIDENCE_JSON" | jq empty 2>/dev/null; then
             echo "reason=no_valid_marker" >> "$GITHUB_OUTPUT"
@@ -273,7 +361,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
+          PLANE_AVAILABLE: ${{ steps.plane-resolve.outputs.plane_available }}
 
+      # ── Label swap ──
       - name: Swap labels
         if: success() && steps.check-approved.outputs.skip != 'true'
         run: |
@@ -290,7 +380,7 @@ jobs:
             gh issue edit "$ISSUE_NUMBER" --add-label "plan-to-review"
           fi
 
-          # Non-bugs: chain estimate workflow automatically
+          # Non-bugs: chain estimate workflow
           if [ "$IS_BUG" = "false" ]; then
             gh label create "estimate-ready" --color "3B82F6" --description "Pret pour estimation" 2>/dev/null || true
             gh issue edit "$ISSUE_NUMBER" --add-label "estimate-ready"
@@ -299,6 +389,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           AUTO_APPROVE: ${{ steps.confidence.outputs.auto_approve }}
+          IS_BUG: ${{ steps.confidence.outputs.is_bug }}
           SCORE: ${{ steps.confidence.outputs.score }}
           FACTORS: ${{ steps.confidence.outputs.factors }}
-          IS_BUG: ${{ steps.confidence.outputs.is_bug }}

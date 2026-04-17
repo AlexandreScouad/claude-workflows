@@ -11,7 +11,7 @@ on:
 jobs:
   review:
     if: github.event.action != 'labeled' || github.event.label.name == 'review-ready'
-    uses: scouad/claude-workflows/.github/workflows/claude-pr-review.yml@main
+    uses: scouad/claude-workflows/.github/workflows/claude-pr-review.yml@v1
     with:
       project_name: mon-projet
       # extra_review_rules: |
