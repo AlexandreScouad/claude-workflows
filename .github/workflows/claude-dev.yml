@@ -73,6 +73,7 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+      actions: read
 
     steps:
       - name: Check if already implemented
@@ -337,9 +338,13 @@ jobs:
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "chore: auto-fix lint issues"
-            git push -u origin HEAD
+            # --ignore-errors : evite exit 1 quand un fichier ignored par .gitignore
+            # est nomme via pathspec negatif (utile si un caller ajoute des `:!` patterns).
+            git add -A --ignore-errors
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: auto-fix lint issues"
+              git push -u origin HEAD
+            fi
           fi
 
       - name: Create PR
