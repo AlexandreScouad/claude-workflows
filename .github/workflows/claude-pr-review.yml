@@ -25,6 +25,8 @@ on:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
+      AGENT_CALLBACK_SECRET:
+        required: false
 
 jobs:
   review:
@@ -207,3 +209,35 @@ jobs:
             ```
 
           claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+
+      - name: Notify feedback-app
+        if: always()
+        env:
+          AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL || 'https://feedback.scouad.fr' }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          ISSUE_NUMBER: ${{ github.event.pull_request.number }}
+          STAGE: pr-review
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$AGENT_CALLBACK_SECRET" ]; then
+            echo "AGENT_CALLBACK_SECRET not set — skipping feedback-app notify"
+            exit 0
+          fi
+          case "$JOB_STATUS" in
+            success) STATUS="completed" ;;
+            *)       STATUS="failed" ;;
+          esac
+          PAYLOAD=$(jq -nc \
+            --arg owner "$REPO_OWNER" \
+            --arg name "$REPO_NAME" \
+            --argjson issue "$ISSUE_NUMBER" \
+            --arg stage "$STAGE" \
+            --arg status "$STATUS" \
+            '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,stage:$stage,status:$status}')
+          curl -sS -X POST "$FEEDBACK_APP_URL/api/agent-callback" \
+            -H "Authorization: Bearer $AGENT_CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            || echo "[notify] callback failed (non-blocking)"
