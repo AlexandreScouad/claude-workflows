@@ -516,7 +516,6 @@ jobs:
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ steps.repo_token.outputs.anthropic_key }}
           allowed_bots: "makeplane[bot]"
           settings: |
             {"permissions":{"allow":["Read","Grep","Glob","Write","Bash(cat *)","Bash(ls *)"]}}
@@ -649,7 +648,6 @@ jobs:
           TDD_MODE: ${{ steps.tdd.outputs.tdd_mode }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ steps.repo_token.outputs.anthropic_key }}
           allowed_bots: "makeplane[bot]"
           branch_name_template: "claude/issue-{{entityNumber}}"
           base_branch: ${{ inputs.base_branch }}
