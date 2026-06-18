@@ -370,7 +370,8 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
-          allowed_tools: "Glob,Grep,Read,Write,Bash(git log *),Bash(git diff *),Bash(ls *),Bash(cat *),Bash(echo *),Bash(printf *),Bash(curl *)"
+          settings: |
+            {"permissions":{"allow":["Glob","Grep","Read","Write","Bash(git log *)","Bash(git diff *)","Bash(ls *)","Bash(cat *)","Bash(echo *)","Bash(printf *)","Bash(curl *)"]}}
           # track_progress n'est supporté que pour les events issue/PR — en mode
           # dispatch (workflow_dispatch) l'action échoue si activé. Désactivé là.
           track_progress: ${{ github.event_name != 'workflow_dispatch' && 'true' || 'false' }}
