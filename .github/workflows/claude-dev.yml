@@ -646,6 +646,12 @@ jobs:
           allowed_bots: "makeplane[bot]"
           branch_name_template: "claude/issue-{{entityNumber}}"
           base_branch: ${{ inputs.base_branch }}
+          # Permissions d'outils : claude-code-action@v1 ne donne pas Write/Edit/Bash
+          # sans `settings` (cf. step plan qui ne pouvait pas écrire PLAN.md). Sans
+          # ça, l'implémentation ne peut pas modifier le code.
+          settings: |
+            {"permissions":{"allow":["Read","Grep","Glob","Edit","Write","MultiEdit","Bash"]}}
+          claude_args: '--max-turns 200'
           # track_progress n'est supporté que pour les events issue/PR — en mode
           # dispatch (workflow_dispatch) l'action échoue si activé. Désactivé là.
           track_progress: ${{ github.event_name != 'workflow_dispatch' && 'true' || 'false' }}
