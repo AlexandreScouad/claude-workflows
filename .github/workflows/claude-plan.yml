@@ -154,6 +154,11 @@ jobs:
           fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          ANTHROPIC_KEY=$(echo "$RESP" | jq -r '.anthropicKey // empty')
+          if [ -n "$ANTHROPIC_KEY" ]; then
+            echo "::add-mask::$ANTHROPIC_KEY"
+            echo "anthropic_key=$ANTHROPIC_KEY" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── Resolve context ──
       # Single source of truth for repo / issue / title / body across both
@@ -365,9 +370,12 @@ jobs:
           PLANE_TEST_PROP_ID: ${{ steps.plane-resolve.outputs.test_prop_id }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ steps.repo_token.outputs.anthropic_key }}
           allowed_bots: "makeplane[bot]"
           allowed_tools: "Glob,Grep,Read,Write,Bash(git log *),Bash(git diff *),Bash(ls *),Bash(cat *),Bash(echo *),Bash(printf *),Bash(curl *)"
-          track_progress: "true"
+          # track_progress n'est supporté que pour les events issue/PR — en mode
+          # dispatch (workflow_dispatch) l'action échoue si activé. Désactivé là.
+          track_progress: ${{ github.event_name != 'workflow_dispatch' && 'true' || 'false' }}
           prompt: |
             Tu es un architecte logiciel senior pour le projet ${{ inputs.project_name }}. Produis un plan d'implémentation **orienté décision et anti-régression**.
 
@@ -380,40 +388,15 @@ jobs:
 
             ## Stockage du plan
 
-            `$PLANE_AVAILABLE` indique si Plane est connecté.
+            Écris **toujours** trois fichiers à la racine du repo. C'est le workflow
+            (pas toi) qui les publie ensuite (DB feedback-app + commentaire GitHub +
+            Plane). Ne poste rien toi-même, ne répète pas le plan dans ta réponse.
 
-            **Cas A (`$PLANE_AVAILABLE == "true"`)** :
-            1. Écris `PLAN.md` (markdown propre, sans balises HTML, selon le template ci-dessous)
-            2. Écris `TEST-PLAN.md` (tableau scénarios avec colonne "Risque mitigé")
-            3. Écris `plan-confidence.json` (voir format ci-bas)
-            4. Pousse le plan vers Plane :
-               ```bash
-               curl -sS -X POST \
-                 -H "x-api-key: $PLANE_API_TOKEN" \
-                 -H "Content-Type: application/json" \
-                 -d "$(jq -Rs '{value: .}' < PLAN.md)" \
-                 "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-items/$PLANE_WORK_ITEM_ID/work-item-properties/$PLANE_PLAN_PROP_ID/values/"
-               ```
-               Si `$PLANE_TEST_PROP_ID` est non vide, fais pareil pour TEST-PLAN.md avec ce prop ID.
-            5. Réponds uniquement : `✅ Plan écrit dans Plane (work item $PLANE_WORK_ITEM_ID).`
-               NE répète PAS le plan dans ta réponse.
+            1. `PLAN.md` — markdown propre (template ci-dessous), sans balises HTML.
+            2. `TEST-PLAN.md` — plan de test (template ci-dessous).
+            3. `plan-confidence.json` — scoring (format ci-bas).
 
-            **Cas B (`$PLANE_AVAILABLE != "true"`)** :
-            Ta réponse sera postée comme commentaire sur l'issue — NE CRÉE AUCUN FICHIER.
-            Mets tout dans ta réponse avec ce format exact :
-            ```
-            🔽 PLAN-START 🔽
-            <details><summary>📋 Plan — Issue #${{ steps.ctx.outputs.issue }}</summary>
-            [plan markdown complet selon le template ci-dessous]
-            <!-- TEST-PLAN-START -->
-            [plan de test]
-            <!-- TEST-PLAN-END -->
-            </details>
-            🔼 PLAN-END 🔼
-            ---
-            *Ajoutez le label `plan-approved` pour lancer l'implémentation.*
-            <!-- PLAN-CONFIDENCE: {...} -->
-            ```
+            Ta réponse finale doit être courte, ex. : `✅ PLAN.md, TEST-PLAN.md et plan-confidence.json écrits.`
 
             ## Documents projet à lire
 
@@ -436,7 +419,7 @@ jobs:
 
             Budget : **≤15 tours d'exploration**.
 
-            ## Template OBLIGATOIRE pour `PLAN.md` (et cas B)
+            ## Template OBLIGATOIRE pour `PLAN.md`
 
             ```markdown
             # Plan #${{ steps.ctx.outputs.issue }} — [Titre court]
@@ -550,7 +533,7 @@ jobs:
 
             **Auto-approve** : `true` ssi `confidence_score ≥${{ inputs.auto_approve_threshold }} ET coverage_score ≥${{ inputs.auto_approve_coverage_threshold }} ET risk_level != "red"`.
 
-            **Cas A** → écris `plan-confidence.json` :
+            Écris `plan-confidence.json` :
             ```json
             {
               "confidence_score": N,
@@ -572,8 +555,6 @@ jobs:
             }
             ```
 
-            **Cas B** → dernière ligne du commentaire : `<!-- PLAN-CONFIDENCE: {même JSON} -->`
-
             ${{ inputs.extra_prompt }}
 
             ## Règles
@@ -587,6 +568,92 @@ jobs:
           claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
 
       # ── Extract confidence score (dual-format with legacy fallback) ──
+      # ── Publier le plan : DB feedback-app (source de vérité) + commentaire
+      #    GitHub (record/fallback) + Plane (si connecté). Lit les fichiers
+      #    écrits par Claude (PLAN.md / TEST-PLAN.md / plan-confidence.json). ──
+      - name: Publier le plan
+        if: success() && steps.check-approved.outputs.skip != 'true'
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ steps.ctx.outputs.repo }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ steps.ctx.outputs.repo }}
+          PLANE_AVAILABLE: ${{ steps.plane-resolve.outputs.plane_available }}
+          PLANE_API_TOKEN: ${{ secrets.PLANE_API_TOKEN }}
+          PLANE_BASE_URL: ${{ vars.PLANE_BASE_URL }}
+          PLANE_WORKSPACE: ${{ vars.PLANE_WORKSPACE }}
+          PLANE_PROJECT_ID: ${{ vars.PLANE_PROJECT_ID }}
+          PLANE_WORK_ITEM_ID: ${{ steps.plane-resolve.outputs.work_item_id }}
+          PLANE_PLAN_PROP_ID: ${{ steps.plane-resolve.outputs.plan_prop_id }}
+          PLANE_TEST_PROP_ID: ${{ steps.plane-resolve.outputs.test_prop_id }}
+        run: |
+          if [ ! -f PLAN.md ]; then
+            echo "::error::PLAN.md introuvable — Claude n'a pas écrit le plan"
+            exit 1
+          fi
+          PLAN_MD=$(cat PLAN.md)
+          TEST_MD=""
+          [ -f TEST-PLAN.md ] && TEST_MD=$(cat TEST-PLAN.md)
+          CONF_JSON="{}"
+          if [ -f plan-confidence.json ] && jq empty plan-confidence.json 2>/dev/null; then
+            CONF_JSON=$(jq -c . plan-confidence.json)
+          fi
+
+          # 1) DB feedback-app (source de vérité)
+          if [ -n "$CALLBACK_URL" ] && [ -n "$CALLBACK_SECRET" ]; then
+            OWNER="${REPO_FULL_NAME%%/*}"
+            NAME="${REPO_FULL_NAME##*/}"
+            PAYLOAD=$(jq -nc \
+              --arg owner "$OWNER" --arg name "$NAME" \
+              --argjson issue "$ISSUE_NUMBER" \
+              --arg plan "$PLAN_MD" --arg test "$TEST_MD" \
+              --argjson conf "$CONF_JSON" \
+              '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,plan:$plan,testPlan:$test,confidence:$conf}')
+            curl -sS -X POST "$CALLBACK_URL/api/agent-callback/plan" \
+              -H "Authorization: Bearer $CALLBACK_SECRET" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              && echo "::notice::plan stocké en DB feedback-app" \
+              || echo "::warning::POST plan DB échoué (non-bloquant)"
+          else
+            echo "::notice::FEEDBACK_APP_URL/AGENT_CALLBACK_SECRET absents — skip DB"
+          fi
+
+          # 2) Commentaire GitHub (record humain + fallback dev/app)
+          {
+            echo "🔽 PLAN-START 🔽"
+            echo ""
+            echo "<details><summary>📋 Plan — Issue #$ISSUE_NUMBER</summary>"
+            echo ""
+            echo "$PLAN_MD"
+            echo ""
+            echo "<!-- TEST-PLAN-START -->"
+            echo "$TEST_MD"
+            echo "<!-- TEST-PLAN-END -->"
+            echo "</details>"
+            echo ""
+            echo "🔼 PLAN-END 🔼"
+            echo ""
+            echo "<!-- PLAN-CONFIDENCE: $CONF_JSON -->"
+          } > plan-comment.md
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file plan-comment.md \
+            && echo "::notice::commentaire plan posté" \
+            || echo "::warning::commentaire plan échoué (non-bloquant)"
+
+          # 3) Plane (si connecté)
+          if [ "$PLANE_AVAILABLE" = "true" ] && [ -n "$PLANE_PLAN_PROP_ID" ]; then
+            curl -sS -X POST -H "x-api-key: $PLANE_API_TOKEN" -H "Content-Type: application/json" \
+              -d "$(jq -Rs '{value: .}' < PLAN.md)" \
+              "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-items/$PLANE_WORK_ITEM_ID/work-item-properties/$PLANE_PLAN_PROP_ID/values/" || true
+            if [ -n "$PLANE_TEST_PROP_ID" ] && [ -f TEST-PLAN.md ]; then
+              curl -sS -X POST -H "x-api-key: $PLANE_API_TOKEN" -H "Content-Type: application/json" \
+                -d "$(jq -Rs '{value: .}' < TEST-PLAN.md)" \
+                "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-items/$PLANE_WORK_ITEM_ID/work-item-properties/$PLANE_TEST_PROP_ID/values/" || true
+            fi
+          fi
+
       - name: Extract plan confidence
         if: success() && steps.check-approved.outputs.skip != 'true'
         id: confidence
@@ -618,11 +685,11 @@ jobs:
 
           CONFIDENCE_JSON=""
 
-          # Priority 1: plan-confidence.json (Plane mode)
-          if [ "$PLANE_AVAILABLE" = "true" ] && [ -f plan-confidence.json ]; then
+          # Priority 1: plan-confidence.json (toujours, si présent)
+          if [ -f plan-confidence.json ]; then
             if jq empty plan-confidence.json 2>/dev/null; then
               CONFIDENCE_JSON=$(cat plan-confidence.json)
-              echo "Confidence read from plan-confidence.json (Plane mode)"
+              echo "Confidence read from plan-confidence.json"
             else
               echo "::warning::plan-confidence.json invalid — fallback to comments"
             fi
