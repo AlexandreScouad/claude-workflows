@@ -103,6 +103,11 @@ on:
         required: false
       TARGET_REPO_PAT:
         required: false
+      # Bearer secret for POST /api/agent-callback (run-id reporting). Only
+      # needed in dispatch mode (read from repo secrets directly); declared
+      # here so workflow_call callers may also pass it via `secrets: inherit`.
+      AGENT_CALLBACK_SECRET:
+        required: false
 
 jobs:
   generate-plan:
@@ -164,6 +169,43 @@ jobs:
             echo "$BODY"
             echo "__SCOUAD_EOF__"
           } >> "$GITHUB_OUTPUT"
+
+      # ── Report run id to feedback-app (dispatch mode only) ──
+      # Lets feedback-app attach THIS GitHub Actions run to its pipeline_run,
+      # so the reconcile/runner-health crons read the exact run status
+      # (cancelled/timed_out, not just failure) instead of matching by title.
+      # Best-effort & non-blocking: skips silently if unconfigured or on error.
+      # Only in dispatch mode — in workflow_call mode the run lives on the
+      # client repo and is matched there by title.
+      - name: Report run id to feedback-app
+        if: inputs.repo_full_name != ''
+        continue-on-error: true
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ steps.ctx.outputs.repo }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::notice::agent-callback not configured (FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET) — skipping run-id report"
+            exit 0
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"
+          NAME="${REPO_FULL_NAME##*/}"
+          PAYLOAD=$(jq -nc \
+            --arg owner "$OWNER" --arg name "$NAME" \
+            --argjson issue "$ISSUE_NUMBER" \
+            --argjson runId "$RUN_ID" \
+            --arg runRepo "$RUN_REPO" \
+            '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,stage:"plan",status:"started",ghRunId:$runId,ghRunRepo:$runRepo}')
+          curl -sS -X POST "$CALLBACK_URL/api/agent-callback" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            && echo "::notice::reported run id $RUN_ID for issue #$ISSUE_NUMBER" \
+            || echo "::warning::run-id report failed (non-blocking)"
 
       - name: Check if plan already approved
         id: check-approved
