@@ -1,9 +1,41 @@
 name: Claude Estimate (Reusable)
-# Security note: github.event.issue.title/body are used ONLY in:
-# 1. prompt: input of claude-code-action (safe, string parameter)
-# 2. env: vars consumed by printf with --data-urlencode (safe)
+# Security note:
+# - Issue title/body resolved via Resolve context step (`gh issue view`),
+#   exposed as steps.ctx.outputs.* — used in prompt: input (action parameter,
+#   not shell) and in env: vars (safe, not shell-interpolated)
+# - workflow_dispatch inputs validated by GitHub typing
+# - The sync-to-plane job stays event-only (gated on github.event.label.name)
 
 on:
+  workflow_dispatch:
+    inputs:
+      repo_full_name:
+        description: 'Target repo (owner/name)'
+        type: string
+        required: true
+      issue_number:
+        description: 'GitHub issue number on the target repo'
+        type: string
+        required: true
+      base_branch:
+        type: string
+        default: 'recette'
+      project_name:
+        type: string
+        required: true
+      estimation_grid:
+        description: 'Custom estimation grid (markdown table). Empty = standard Scouad grid.'
+        type: string
+        default: ''
+      model:
+        type: string
+        default: 'claude-sonnet-4-6'
+      max_turns:
+        type: number
+        default: 30
+      extra_prompt:
+        type: string
+        default: ''
   workflow_call:
     inputs:
       base_branch:
@@ -32,15 +64,21 @@ on:
         required: false
       PLANE_API_TOKEN:
         required: false
+      # Bearer secret for POST /api/agent-callback (run-id reporting). Only
+      # needed in dispatch mode (read from repo secrets directly); declared
+      # here so workflow_call callers may also pass it via `secrets: inherit`.
       AGENT_CALLBACK_SECRET:
         required: false
 
 jobs:
   estimate:
+    # Skip in workflow_call mode if the triggering label is `estimate-approved`
+    # — that path goes to sync-to-plane, not a re-estimation.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name != 'estimate-approved'
     runs-on: self-hosted
     timeout-minutes: 15
     concurrency:
-      group: claude-estimate-${{ github.event.issue.number }}
+      group: claude-estimate-${{ github.event.issue.number || inputs.issue_number }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -48,8 +86,84 @@ jobs:
       id-token: write
 
     steps:
+      # ── Resolve context ──
+      - name: Resolve context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          INPUT_REPO: ${{ inputs.repo_full_name }}
+          INPUT_ISSUE: ${{ inputs.issue_number }}
+          EVENT_REPO: ${{ github.repository }}
+          EVENT_ISSUE: ${{ github.event.issue.number }}
+        run: |
+          if [ -n "$INPUT_REPO" ]; then
+            REPO="$INPUT_REPO"
+            ISSUE="$INPUT_ISSUE"
+          else
+            REPO="$EVENT_REPO"
+            ISSUE="$EVENT_ISSUE"
+          fi
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+
+          DATA=$(gh issue view "$ISSUE" --repo "$REPO" --json title,body)
+          TITLE=$(echo "$DATA" | jq -r '.title // ""')
+          {
+            echo "title<<__SCOUAD_EOF__"
+            echo "$TITLE"
+            echo "__SCOUAD_EOF__"
+          } >> "$GITHUB_OUTPUT"
+          echo "$DATA" | jq -r '.body // ""' > /tmp/issue-body.txt
+          BODY=$(head -c 60000 /tmp/issue-body.txt)
+          {
+            echo "body<<__SCOUAD_EOF__"
+            echo "$BODY"
+            echo "__SCOUAD_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Report run id to feedback-app (dispatch mode only) ──
+      # Lets feedback-app attach THIS GitHub Actions run to its pipeline_run,
+      # so the reconcile/runner-health crons read the exact run status
+      # (cancelled/timed_out, not just failure) instead of matching by title.
+      # Best-effort & non-blocking: skips silently if unconfigured or on error.
+      # Only in dispatch mode — in workflow_call mode the run lives on the
+      # client repo and is matched there by title.
+      - name: Report run id to feedback-app
+        if: inputs.repo_full_name != ''
+        continue-on-error: true
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ steps.ctx.outputs.repo }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::notice::agent-callback not configured (FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET) — skipping run-id report"
+            exit 0
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"
+          NAME="${REPO_FULL_NAME##*/}"
+          PAYLOAD=$(jq -nc \
+            --arg owner "$OWNER" --arg name "$NAME" \
+            --argjson issue "$ISSUE_NUMBER" \
+            --argjson runId "$RUN_ID" \
+            --arg runRepo "$RUN_REPO" \
+            '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,stage:"estimate",status:"started",ghRunId:$runId,ghRunRepo:$runRepo}')
+          curl -sS -X POST "$CALLBACK_URL/api/agent-callback" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            && echo "::notice::reported run id $RUN_ID for issue #$ISSUE_NUMBER" \
+            || echo "::warning::run-id report failed (non-blocking)"
+
       - name: Check if already estimated
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          REPO: ${{ steps.ctx.outputs.repo }}
         run: |
           LABELS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
           if echo "$LABELS" | grep -q "^estimated$"; then
@@ -57,25 +171,23 @@ jobs:
           else
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          REPO: ${{ github.repository }}
 
       - name: Checkout repository
         if: steps.check.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
+          repository: ${{ steps.ctx.outputs.repo }}
           ref: ${{ inputs.base_branch }}
+          token: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
       - name: Estimate with Claude
         if: steps.check.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         env:
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_TITLE: ${{ steps.ctx.outputs.title }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          ISSUE_BODY: ${{ steps.ctx.outputs.body }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
@@ -83,10 +195,10 @@ jobs:
           prompt: |
             Estime la taille de cette issue avec une analyse structuree.
 
-            ## Issue #${{ github.event.issue.number }}
-            **Titre** : ${{ github.event.issue.title }}
+            ## Issue #${{ steps.ctx.outputs.issue }}
+            **Titre** : ${{ steps.ctx.outputs.title }}
             **Description** :
-            ${{ github.event.issue.body }}
+            ${{ steps.ctx.outputs.body }}
 
             ## Phase 1 — EXPLORATION
 
@@ -179,15 +291,16 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
           PROJECT_NAME: ${{ inputs.project_name }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ steps.ctx.outputs.title }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
 
       - name: Remove estimate-ready label
         if: always() && steps.check.outputs.skip != 'true'
-        run: gh issue edit "$ISSUE_NUMBER" --remove-label "estimate-ready"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          REPO: ${{ steps.ctx.outputs.repo }}
+        run: gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "estimate-ready"
 
   sync-to-plane:
     if: github.event.label.name == 'estimate-approved'
@@ -242,35 +355,3 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-
-      - name: Notify feedback-app
-        if: always()
-        env:
-          AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
-          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL || 'https://feedback.scouad.fr' }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          STAGE: estimate
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          if [ -z "$AGENT_CALLBACK_SECRET" ]; then
-            echo "AGENT_CALLBACK_SECRET not set — skipping feedback-app notify"
-            exit 0
-          fi
-          case "$JOB_STATUS" in
-            success) STATUS="completed" ;;
-            *)       STATUS="failed" ;;
-          esac
-          PAYLOAD=$(jq -nc \
-            --arg owner "$REPO_OWNER" \
-            --arg name "$REPO_NAME" \
-            --argjson issue "$ISSUE_NUMBER" \
-            --arg stage "$STAGE" \
-            --arg status "$STATUS" \
-            '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,stage:$stage,status:$status}')
-          curl -sS -X POST "$FEEDBACK_APP_URL/api/agent-callback" \
-            -H "Authorization: Bearer $AGENT_CALLBACK_SECRET" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD" \
-            || echo "[notify] callback failed (non-blocking)"
