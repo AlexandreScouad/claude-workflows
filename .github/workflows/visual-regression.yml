@@ -1,0 +1,66 @@
+name: Visual Regression
+
+# Runs Playwright screenshot comparison against a Vercel preview URL,
+# reports the verdict to feedback-app's gate-runner. Triggered exclusively
+# via workflow_dispatch from feedback-app once a preview deployment has
+# succeeded (deployment_status webhook).
+#
+# This workflow does NOT operate on a target repo's source — it only hits
+# the preview URL. Therefore no checkout of the target repo is needed,
+# and no TARGET_REPO_PAT is required.
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: 'feedback-app project UUID'
+        type: string
+        required: true
+      pr_number:
+        description: 'PR number on the target repo (used for diff path)'
+        type: string
+        required: true
+      gh_issue_number:
+        description: 'Linked GitHub issue number'
+        type: string
+        required: true
+      preview_url:
+        description: 'Vercel preview URL to test against'
+        type: string
+        required: true
+      feedback_app_url:
+        description: 'Base URL of feedback-app (for config + webhook calls)'
+        type: string
+        default: 'https://feedback.scouad.fr'
+
+jobs:
+  visual:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout claude-workflows
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-save playwright pixelmatch pngjs
+
+      - name: Install Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run visual regression
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          GH_ISSUE_NUMBER: ${{ inputs.gh_issue_number }}
+          PREVIEW_URL: ${{ inputs.preview_url }}
+          FEEDBACK_APP_URL: ${{ inputs.feedback_app_url }}
+          VISUAL_REGRESSION_WEBHOOK_SECRET: ${{ secrets.VISUAL_REGRESSION_WEBHOOK_SECRET }}
+        run: node scripts/visual-regression.mjs
