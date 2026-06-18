@@ -398,12 +398,30 @@ jobs:
           TEST_PROP_ID: ${{ steps.plane-resolve.outputs.test_prop_id }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
         run: |
           set +e
           PLAN_SOURCE=""
 
-          # Priority 1: Plane custom fields
-          if [ "$PLANE_AVAILABLE" = "true" ] && [ -n "$PLAN_PROP_ID" ]; then
+          # Priority 1: DB feedback-app (source de vérité)
+          if [ -n "$CALLBACK_URL" ] && [ -n "$CALLBACK_SECRET" ]; then
+            RESP=$(curl -sS -G "$CALLBACK_URL/api/agent-callback/plan" \
+              --data-urlencode "repo=$REPO" \
+              --data-urlencode "ghIssueNumber=$ISSUE_NUMBER" \
+              -H "Authorization: Bearer $CALLBACK_SECRET")
+            DB_PLAN=$(echo "$RESP" | jq -r '.data.plan // empty')
+            if [ -n "$DB_PLAN" ]; then
+              printf '%s' "$DB_PLAN" > PLAN.md
+              echo "$RESP" | jq -r '.data.testPlan // empty' > TEST-PLAN.md
+              [ -s TEST-PLAN.md ] || rm -f TEST-PLAN.md
+              PLAN_SOURCE="db"
+              echo "::notice::plan récupéré depuis la DB feedback-app"
+            fi
+          fi
+
+          # Priority 2: Plane custom fields
+          if [ -z "$PLAN_SOURCE" ] && [ "$PLANE_AVAILABLE" = "true" ] && [ -n "$PLAN_PROP_ID" ]; then
             PLAN_VALUE=$(curl -sS -H "x-api-key: $PLANE_API_TOKEN" \
               "$PLANE_BASE_URL/api/v1/workspaces/$PLANE_WORKSPACE/projects/$PLANE_PROJECT_ID/work-items/$WORK_ITEM_ID/work-item-properties/$PLAN_PROP_ID/values/" \
               | jq -r '.value // empty')
@@ -421,8 +439,8 @@ jobs:
             fi
           fi
 
-          # Priority 2: GitHub issue comments
-          if [ "$PLAN_SOURCE" != "plane" ]; then
+          # Priority 3: GitHub issue comments (fallback rétrocompat)
+          if [ -z "$PLAN_SOURCE" ]; then
             echo "::notice::Fetching plan from GitHub comments"
             PLAN_CONTENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments --jq '
               .comments | map(select(.body | contains("PLAN-START") or contains("Plan d'\''implementation"))) | last | .body // empty
