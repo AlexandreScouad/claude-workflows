@@ -154,6 +154,11 @@ jobs:
           fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          ANTHROPIC_KEY=$(echo "$RESP" | jq -r '.anthropicKey // empty')
+          if [ -n "$ANTHROPIC_KEY" ]; then
+            echo "::add-mask::$ANTHROPIC_KEY"
+            echo "anthropic_key=$ANTHROPIC_KEY" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── Resolve context ──
       # Single source of truth for repo / issue / title / body across both
@@ -365,6 +370,7 @@ jobs:
           PLANE_TEST_PROP_ID: ${{ steps.plane-resolve.outputs.test_prop_id }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ steps.repo_token.outputs.anthropic_key }}
           allowed_bots: "makeplane[bot]"
           allowed_tools: "Glob,Grep,Read,Write,Bash(git log *),Bash(git diff *),Bash(ls *),Bash(cat *),Bash(echo *),Bash(printf *),Bash(curl *)"
           track_progress: "true"

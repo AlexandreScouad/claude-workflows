@@ -115,6 +115,11 @@ jobs:
           fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          ANTHROPIC_KEY=$(echo "$RESP" | jq -r '.anthropicKey // empty')
+          if [ -n "$ANTHROPIC_KEY" ]; then
+            echo "::add-mask::$ANTHROPIC_KEY"
+            echo "anthropic_key=$ANTHROPIC_KEY" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── Resolve context ──
       - name: Resolve context
@@ -220,6 +225,7 @@ jobs:
           ISSUE_BODY: ${{ steps.ctx.outputs.body }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ steps.repo_token.outputs.anthropic_key }}
           allowed_bots: "makeplane[bot]"
           allowed_tools: "Bash(cat *),Bash(echo *),Bash(printf *),Glob,Grep,Read,Write"
           prompt: |
