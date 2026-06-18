@@ -198,11 +198,6 @@ jobs:
           fi
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-          ANTHROPIC_KEY=$(echo "$RESP" | jq -r '.anthropicKey // empty')
-          if [ -n "$ANTHROPIC_KEY" ]; then
-            echo "::add-mask::$ANTHROPIC_KEY"
-            echo "anthropic_key=$ANTHROPIC_KEY" >> "$GITHUB_OUTPUT"
-          fi
 
       # ── Resolve context ──
       # Single source of truth for repo / issue / title across both
