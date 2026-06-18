@@ -101,8 +101,6 @@ on:
         required: true
       PLANE_API_TOKEN:
         required: false
-      TARGET_REPO_PAT:
-        required: false
       # Bearer secret for POST /api/agent-callback (run-id reporting). Only
       # needed in dispatch mode (read from repo secrets directly); declared
       # here so workflow_call callers may also pass it via `secrets: inherit`.
@@ -126,6 +124,37 @@ jobs:
       id-token: write
 
     steps:
+      # ── Fetch target-repo token (dispatch mode) ──
+      # En dispatch le run vit dans claude-workflows ; son GITHUB_TOKEN ne peut
+      # pas toucher le repo client. On récupère le bon token par-org depuis
+      # feedback-app (réutilise github_connections). Skippé en workflow_call
+      # (le GITHUB_TOKEN de l'appelant a déjà accès). Masqué, jamais loggé.
+      - name: Fetch target repo token
+        id: repo_token
+        if: inputs.repo_full_name != ''
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ inputs.repo_full_name }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::error::FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET requis pour le fetch du token cible (dispatch)"
+            exit 1
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"
+          NAME="${REPO_FULL_NAME##*/}"
+          RESP=$(curl -sS -X POST "$CALLBACK_URL/api/agent-callback/repo-token" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg o "$OWNER" --arg n "$NAME" '{owner:$o,repo:$n}')")
+          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::pas de token pour $REPO_FULL_NAME"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
       # ── Resolve context ──
       # Single source of truth for repo / issue / title / body across both
       # workflow_dispatch (inputs) and workflow_call (event payload). All
@@ -135,7 +164,7 @@ jobs:
       - name: Resolve context
         id: ctx
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           INPUT_REPO: ${{ inputs.repo_full_name }}
           INPUT_ISSUE: ${{ inputs.issue_number }}
           EVENT_REPO: ${{ github.repository }}
@@ -210,7 +239,7 @@ jobs:
       - name: Check if plan already approved
         id: check-approved
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
         run: |
@@ -232,7 +261,7 @@ jobs:
           ref: ${{ inputs.base_branch }}
           # PAT only needed when checking out a *different* repo (dispatch mode).
           # In workflow_call mode the default GITHUB_TOKEN suffices for self-checkout.
-          token: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
       - name: Discover project docs
@@ -562,7 +591,7 @@ jobs:
         if: success() && steps.check-approved.outputs.skip != 'true'
         id: confidence
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
           CONFIDENCE_THRESHOLD: ${{ inputs.auto_approve_threshold }}
@@ -677,7 +706,7 @@ jobs:
       - name: Swap labels
         if: success() && steps.check-approved.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
           AUTO_APPROVE: ${{ steps.confidence.outputs.auto_approve }}

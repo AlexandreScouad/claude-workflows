@@ -145,8 +145,6 @@ on:
         required: true
       PLANE_API_TOKEN:
         required: false
-      TARGET_REPO_PAT:
-        required: false
       # Bearer secret for POST /api/agent-callback (run-id reporting). Only
       # needed in dispatch mode (read from repo secrets directly); declared
       # here so workflow_call callers may also pass it via `secrets: inherit`.
@@ -170,13 +168,44 @@ jobs:
       actions: read
 
     steps:
+      # ── Fetch target-repo token (dispatch mode) ──
+      # En dispatch le run vit dans claude-workflows ; son GITHUB_TOKEN ne peut
+      # pas toucher le repo client. On récupère le bon token par-org depuis
+      # feedback-app (réutilise github_connections). Skippé en workflow_call
+      # (le GITHUB_TOKEN de l'appelant a déjà accès). Masqué, jamais loggé.
+      - name: Fetch target repo token
+        id: repo_token
+        if: inputs.repo_full_name != ''
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ inputs.repo_full_name }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::error::FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET requis pour le fetch du token cible (dispatch)"
+            exit 1
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"
+          NAME="${REPO_FULL_NAME##*/}"
+          RESP=$(curl -sS -X POST "$CALLBACK_URL/api/agent-callback/repo-token" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg o "$OWNER" --arg n "$NAME" '{owner:$o,repo:$n}')")
+          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::pas de token pour $REPO_FULL_NAME"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
       # ── Resolve context ──
       # Single source of truth for repo / issue / title across both
       # workflow_dispatch (inputs) and workflow_call (event payload).
       - name: Resolve context
         id: ctx
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           INPUT_REPO: ${{ inputs.repo_full_name }}
           INPUT_ISSUE: ${{ inputs.issue_number }}
           EVENT_REPO: ${{ github.repository }}
@@ -240,7 +269,7 @@ jobs:
       - name: Check if already implemented
         id: check-existing
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
         run: |
@@ -262,7 +291,7 @@ jobs:
       - name: Remove plan-to-review label
         if: steps.check-existing.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
         run: gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "plan-to-review" 2>/dev/null || true
@@ -273,7 +302,7 @@ jobs:
         with:
           repository: ${{ steps.ctx.outputs.repo }}
           ref: ${{ inputs.base_branch }}
-          token: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
       - name: Setup Node.js
@@ -353,7 +382,7 @@ jobs:
         if: steps.check-existing.outputs.skip != 'true'
         id: plan
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           PLANE_API_TOKEN: ${{ secrets.PLANE_API_TOKEN }}
           PLANE_BASE_URL: ${{ vars.PLANE_BASE_URL }}
           PLANE_WORKSPACE: ${{ vars.PLANE_WORKSPACE }}
@@ -445,7 +474,7 @@ jobs:
         if: steps.check-existing.outputs.skip != 'true'
         id: tdd
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
         run: |
@@ -554,7 +583,7 @@ jobs:
           steps.check-existing.outputs.skip != 'true' &&
           steps.validation.outputs.valid == 'false'
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
         run: |
@@ -770,7 +799,7 @@ jobs:
           steps.check-existing.outputs.skip != 'true' &&
           steps.validation.outputs.valid != 'false'
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           REPO: ${{ steps.ctx.outputs.repo }}
         run: |
           # Cleanup temporary context files only.
@@ -793,7 +822,7 @@ jobs:
           steps.check-existing.outputs.skip != 'true' &&
           steps.validation.outputs.valid != 'false'
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_TITLE: ${{ steps.ctx.outputs.title }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
@@ -890,7 +919,7 @@ jobs:
           steps.check-existing.outputs.skip != 'true' &&
           steps.validation.outputs.valid != 'false'
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
         run: |
@@ -904,7 +933,7 @@ jobs:
       - name: Handle failure
         if: failure() && steps.check-existing.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.TARGET_REPO_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           REPO: ${{ steps.ctx.outputs.repo }}
           # RUN_URL points to the workflow run, which always lives in this
