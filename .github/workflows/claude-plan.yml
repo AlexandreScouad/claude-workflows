@@ -268,6 +268,10 @@ jobs:
         if: steps.check-approved.outputs.skip != 'true'
         id: docs
         run: |
+          # Évite la collision avec un PLAN.md/TEST-PLAN.md committé dans le repo
+          # cible (feedback-app a un PLAN.md = doc de migration). Le job de plan ne
+          # commit jamais → suppression sans impact sur le repo.
+          rm -f PLAN.md TEST-PLAN.md plan-confidence.json
           DOC_FILES=$(ls CLAUDE*.md 2>/dev/null | tr '\n' ',' | sed 's/,$//')
           echo "files=$DOC_FILES" >> $GITHUB_OUTPUT
 
@@ -385,6 +389,11 @@ jobs:
             Écris **toujours** trois fichiers à la racine du repo. C'est le workflow
             (pas toi) qui les publie ensuite (DB feedback-app + commentaire GitHub +
             Plane). Ne poste rien toi-même, ne répète pas le plan dans ta réponse.
+
+            ⚠️ Le repo cible peut contenir des docs de PLANIFICATION PROJET à la
+            racine (`PLAN.md`, `PRD.md`, `PLAN-*.md`…) SANS rapport avec cette issue.
+            Ne les lis pas comme source, ne les recopie pas, ne les étends pas.
+            Planifie UNIQUEMENT l'issue #${{ steps.ctx.outputs.issue }} ci-dessus.
 
             1. `PLAN.md` — markdown propre (template ci-dessous), sans balises HTML.
             2. `TEST-PLAN.md` — plan de test (template ci-dessous).
