@@ -305,6 +305,34 @@ jobs:
           token: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
+      # En workflow_dispatch, claude-code-action ne cree PAS de branche dediee et
+      # committe sur la branche courante. Sans ce step, tout le travail (implementation
+      # + lint-fix) finit pousse DROIT sur base_branch (constate sur feedback-app #18).
+      # On cree donc explicitement claude/issue-N AVANT l'implementation. Si elle existe
+      # deja (run precedent / correction liee a la branche), on la REUTILISE.
+      - name: Create/reuse dedicated branch
+        id: implbranch
+        if: steps.check-existing.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ steps.ctx.outputs.repo }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          IMPL_BRANCH="claude/issue-$ISSUE_NUMBER"
+          echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if git ls-remote --exit-code --heads origin "$IMPL_BRANCH" >/dev/null 2>&1; then
+            echo "Reutilisation de la branche existante $IMPL_BRANCH"
+            git fetch --depth 1 origin "$IMPL_BRANCH"
+            git checkout -B "$IMPL_BRANCH" FETCH_HEAD
+          else
+            echo "Creation de $IMPL_BRANCH depuis $BASE_BRANCH"
+            git checkout -B "$IMPL_BRANCH"
+          fi
+
       - name: Setup Node.js
         if: steps.check-existing.outputs.skip != 'true'
         uses: actions/setup-node@v4
@@ -836,27 +864,37 @@ jobs:
             echo "::warning::audit_migrations=true but ./.github/scripts/audit-migrations.sh missing or not executable — skipping"
           fi
 
-      - name: Commit lint fixes if any
+      - name: Commit lint fixes & push dedicated branch
         if: |
           steps.check-existing.outputs.skip != 'true' &&
           steps.validation.outputs.valid != 'false'
         env:
           GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           REPO: ${{ steps.ctx.outputs.repo }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          BASE_SHA: ${{ steps.implbranch.outputs.base_sha }}
         run: |
           # Cleanup temporary context files only.
           # Keep tech-debt-report.json, migrations-applied.json, migrations-summary.md
           # for the Create PR step to enrich the body, then they are cleaned up there.
+          IMPL_BRANCH="claude/issue-$ISSUE_NUMBER"
           rm -f IMPL_PLAN.md TEST-PLAN.md issue.md plan-validation.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          # Commit d'eventuels changements non commites (lint-fix, lock, etc.).
           if [ -n "$(git status --porcelain -- ':!tech-debt-report.json' ':!migrations-applied.json' ':!migrations-summary.md' ':!regression-audit.md')" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
             git add -A --ignore-errors -- ':!tech-debt-report.json' ':!migrations-applied.json' ':!migrations-summary.md' ':!regression-audit.md'
-            if ! git diff --cached --quiet; then
-              git commit -m "chore: auto-fix lint issues"
-              git push -u origin HEAD
-            fi
+            git diff --cached --quiet || git commit -m "chore: auto-fix lint issues"
+          fi
+          # Pousse la branche DEDIEE (jamais base_branch via HEAD nu) uniquement si
+          # elle a des commits au-dessus de la base — garantit a Create PR un head ref
+          # valide sans jamais ecrire sur base_branch.
+          if [ "$(git rev-parse HEAD)" != "$BASE_SHA" ]; then
+            git push -u origin "HEAD:refs/heads/$IMPL_BRANCH"
+          else
+            echo "Aucun commit au-dessus de $BASE_BRANCH — rien a pousser"
           fi
 
       - name: Create PR
