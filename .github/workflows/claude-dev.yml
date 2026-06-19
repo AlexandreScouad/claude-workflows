@@ -776,7 +776,20 @@ jobs:
         if: |
           steps.check-existing.outputs.skip != 'true' &&
           steps.validation.outputs.valid != 'false'
-        run: ${{ inputs.typecheck_command }}
+        run: |
+          # Filet de type agnostique au nom du script npm. L'input
+          # typecheck_command vise par defaut `npm run check-types` (cockpit) ;
+          # d'autres repos exposent `npm run typecheck`. On detecte le script
+          # present dans package.json plutot que de planter sur "Missing script".
+          # Bloque toujours sur une vraie erreur de type ; ne skippe que si AUCUN
+          # script de typecheck n'existe.
+          SCRIPT=$(node -e "const s=require('./package.json').scripts||{}; process.stdout.write(s.typecheck?'typecheck':(s['check-types']?'check-types':''))")
+          if [ -n "$SCRIPT" ]; then
+            echo "Typecheck via: npm run $SCRIPT"
+            npm run "$SCRIPT"
+          else
+            echo "Aucun script typecheck/check-types dans package.json - etape ignoree (pas de filet de type)."
+          fi
 
       # ── Optional: tech debt check ──
       # Project must provide .github/scripts/check-tech-debt.sh in the target repo.
