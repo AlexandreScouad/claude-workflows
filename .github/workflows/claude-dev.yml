@@ -314,7 +314,11 @@ jobs:
 
       - name: Install dependencies
         if: steps.check-existing.outputs.skip != 'true'
-        run: ${{ inputs.install_command }}
+        # Fallback `npm install` : le lock peut être incomplet pour Linux (deps
+        # optionnelles cross-platform, ex. @img/sharp-wasm32 → @emnapi, absent
+        # d'un lock généré sur macOS) → `npm ci` (strict) refuse. On retombe sur
+        # `npm install` qui résout pour la plateforme courante.
+        run: ${{ inputs.install_command }} || npm install --no-audit --no-fund
 
       - name: Discover project docs
         if: steps.check-existing.outputs.skip != 'true'
