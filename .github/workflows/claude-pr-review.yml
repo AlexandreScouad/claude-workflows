@@ -38,7 +38,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      issues: read
+      issues: write  # pose le label ai-review-pass/fail sur l'issue liee (Gate 4)
       id-token: write
 
     steps:
@@ -209,6 +209,43 @@ jobs:
             ```
 
           claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+
+      # Projette le verdict de review (ecrit dans le commentaire markdown par
+      # l'etape ci-dessus) en label sur l'ISSUE liee. Quality Gate 4 cote
+      # feedback-app ecoute `issues.labeled` (PAS `pull_request.labeled`), donc
+      # on pose le label sur l'issue de feature (steps.issue.outputs.number),
+      # pas sur la PR.
+      - name: Post gate-4 verdict label
+        if: steps.changes.outputs.skip != 'true' && steps.issue.outputs.has_issue == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Recupere le dernier commentaire de review (marqueur "Review — PR").
+          # Le corps vient de l'API GitHub (donnee non fiable) : on le garde dans
+          # une variable shell et on le parse avec grep — jamais d'eval.
+          BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+            --jq '[.comments[] | select(.body | contains("Review — PR"))] | last | .body // ""')
+          if [ -z "$BODY" ]; then
+            echo "Aucun commentaire de review trouve — pas de label gate 4."
+            exit 0
+          fi
+          VERDICT=$(printf '%s\n' "$BODY" | grep -iE '^#+[[:space:]]*Verdict' | head -1)
+          echo "Ligne verdict : $VERDICT"
+          case "$VERDICT" in
+            *"CORRECTIONS REQUISES"*|*REPLANIFICATION*) LABEL="ai-review-fail"; OPP="ai-review-pass" ;;
+            *APPROVE*|*"CORRECTIONS MINEURES"*)         LABEL="ai-review-pass"; OPP="ai-review-fail" ;;
+            *) echo "Verdict non reconnu — aucun label pose."; exit 0 ;;
+          esac
+          gh label create ai-review-pass --repo "$REPO" --color "0E8A16" \
+            --description "Review IA : approuve" 2>/dev/null || true
+          gh label create ai-review-fail --repo "$REPO" --color "D73A4A" \
+            --description "Review IA : corrections requises" 2>/dev/null || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$OPP" 2>/dev/null || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "$LABEL"
+          echo "Pose $LABEL sur l'issue #$ISSUE_NUMBER"
 
       - name: Notify feedback-app
         if: always()
