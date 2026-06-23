@@ -1,0 +1,28 @@
+name: Claude Correction
+
+# Thin caller — à copier dans .github/workflows/ du repo cible.
+#
+# Déclenché quand le label `correction-ready` est posé sur une PR (l'app
+# feedback-app le pose après avoir commenté `@claude Correction demandée: ...`).
+# Le reusable applique la correction sur la MÊME branche de la PR (jamais de
+# nouvelle branche).
+#
+# Secrets requis dans le repo cible : CLAUDE_CODE_OAUTH_TOKEN (abonnement, pas
+# l'API métrée). GITHUB_TOKEN est fourni automatiquement.
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  correct:
+    if: github.event.label.name == 'correction-ready'
+    uses: AlexandreScouad/claude-workflows/.github/workflows/claude-correction.yml@v1
+    with:
+      base_branch: recette
+      project_name: my-project
+      # ⚠️ Adapter aux scripts npm du repo cible. Défauts du reusable :
+      #   lint_command: npm run lint   typecheck_command: npm run check-types
+      # feedback-app utilise par ex. : typecheck_command: npm run typecheck
+      # typecheck_command: npm run typecheck
+    secrets: inherit

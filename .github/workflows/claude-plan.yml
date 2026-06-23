@@ -44,7 +44,7 @@ on:
       max_turns:
         description: 'Max Claude turns'
         type: number
-        default: 100
+        default: 60
       extra_prompt:
         description: 'Extra project-specific instructions appended to the prompt'
         type: string
@@ -83,7 +83,7 @@ on:
       max_turns:
         description: 'Max Claude turns'
         type: number
-        default: 100
+        default: 60
       extra_prompt:
         description: 'Extra project-specific instructions appended to the prompt'
         type: string
@@ -353,6 +353,7 @@ jobs:
       # ── Generate plan with Claude ──
       # Note: issue title/body are used in prompt: input (action parameter, not shell)
       - name: Generate plan with Claude
+        id: generate-plan
         if: steps.check-approved.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         env:
@@ -570,6 +571,32 @@ jobs:
             - RPC : SEARCH → REUSE → ADAPT → CREATE (privilégier la réutilisation)
 
           claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+
+      # ── Tracking consommation tokens → DB feedback-app ──
+      # Parse le execution_file de CE step et POST les tokens à feedback-app, qui
+      # calcule le coût (table de prix unique) et persiste. Aucun fichier commité.
+      # Tolérant : ne casse jamais le pipeline.
+      - name: Report Claude usage
+        if: always() && steps.check-approved.outputs.skip != 'true' && steps.generate-plan.outputs.execution_file != ''
+        env:
+          EXEC_FILE: ${{ steps.generate-plan.outputs.execution_file }}
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue }}
+          WORKFLOW_NAME: Claude Plan
+          STEP_NAME: plan
+          RUN_ID: ${{ github.run_id }}
+          CLAUDE_MODEL: ${{ inputs.model }}
+          REPO: ${{ steps.ctx.outputs.repo }}
+          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+          AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+        # Le working dir contient le repo CIBLE (pas claude-workflows). On récupère
+        # le script depuis le repo public claude-workflows au SHA exact du workflow
+        # réutilisé (job_workflow_sha en mode call ; github.sha en dispatch) et on
+        # l'exécute hors du repo ($RUNNER_TEMP) pour ne rien polluer/committer.
+        run: |
+          REF="${{ github.job_workflow_sha || github.sha }}"
+          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.mjs" -o "$RUNNER_TEMP/report-usage.mjs" \
+            && node "$RUNNER_TEMP/report-usage.mjs" \
+            || echo "::notice::report-usage skipped (download/parse failed)"
 
       # ── Extract confidence score (dual-format with legacy fallback) ──
       # ── Publier le plan : DB feedback-app (source de vérité) + commentaire

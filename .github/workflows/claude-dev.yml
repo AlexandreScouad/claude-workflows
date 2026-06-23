@@ -65,7 +65,7 @@ on:
       max_turns:
         description: 'Max Claude turns'
         type: number
-        default: 120
+        default: 200
       extra_prompt:
         description: 'Extra project-specific instructions'
         type: string
@@ -127,7 +127,7 @@ on:
       max_turns:
         description: 'Max Claude turns'
         type: number
-        default: 120
+        default: 200
       extra_prompt:
         description: 'Extra project-specific instructions'
         type: string
@@ -537,6 +537,7 @@ jobs:
       # Lightweight Claude Sonnet invocation (≤8 turns) that reads issue.md + IMPL_PLAN.md
       # and emits plan-validation.json. If invalid, the Implement step is skipped.
       - name: Validate plan covers issue
+        id: validate-plan
         if: steps.check-existing.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         env:
@@ -599,6 +600,28 @@ jobs:
             - Une fois écrit, réponds simplement : "Validation terminée."
 
           claude_args: '--model claude-sonnet-4-6 --max-turns 8'
+
+      # ── Tracking usage du step validation (Sonnet) → DB feedback-app ──
+      # CRITIQUE : doit tourner AVANT le step Implement, qui réutilise le même
+      # chemin execution_file et l'écraserait (sinon les tokens Sonnet de la
+      # validation seraient recomptés comme Opus). Modèle figé = sonnet-4-6.
+      - name: Report Claude usage (validation)
+        if: always() && steps.check-existing.outputs.skip != 'true' && steps.validate-plan.outputs.execution_file != ''
+        env:
+          EXEC_FILE: ${{ steps.validate-plan.outputs.execution_file }}
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue }}
+          WORKFLOW_NAME: Claude Dev
+          STEP_NAME: validate
+          RUN_ID: ${{ github.run_id }}
+          CLAUDE_MODEL: claude-sonnet-4-6
+          REPO: ${{ steps.ctx.outputs.repo }}
+          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+          AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+        run: |
+          REF="${{ github.job_workflow_sha || github.sha }}"
+          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.mjs" -o "$RUNNER_TEMP/report-usage.mjs" \
+            && node "$RUNNER_TEMP/report-usage.mjs" \
+            || echo "::notice::report-usage (validation) skipped"
 
       # ── Parse plan validation result ──
       # Reads plan-validation.json and exposes `valid` + blockers count to subsequent
@@ -664,6 +687,7 @@ jobs:
       # ── Implement with Claude ──
       # Note: issue title used in prompt: input (action parameter, not shell)
       - name: Implement with Claude
+        id: implement
         if: |
           steps.check-existing.outputs.skip != 'true' &&
           steps.validation.outputs.valid != 'false'
@@ -792,6 +816,26 @@ jobs:
             ${{ inputs.extra_prompt }}
 
           claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+
+      # ── Tracking usage du step implementation (Opus) → DB feedback-app ──
+      # Le step validation a déjà été persisté plus haut (avant cet écrasement).
+      - name: Report Claude usage (implementation)
+        if: always() && steps.check-existing.outputs.skip != 'true' && steps.implement.outputs.execution_file != ''
+        env:
+          EXEC_FILE: ${{ steps.implement.outputs.execution_file }}
+          ISSUE_NUM: ${{ steps.ctx.outputs.issue }}
+          WORKFLOW_NAME: Claude Dev
+          STEP_NAME: implement
+          RUN_ID: ${{ github.run_id }}
+          CLAUDE_MODEL: ${{ inputs.model }}
+          REPO: ${{ steps.ctx.outputs.repo }}
+          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+          AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+        run: |
+          REF="${{ github.job_workflow_sha || github.sha }}"
+          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.mjs" -o "$RUNNER_TEMP/report-usage.mjs" \
+            && node "$RUNNER_TEMP/report-usage.mjs" \
+            || echo "::notice::report-usage (implementation) skipped"
 
       - name: Lint fix (safety net)
         if: |
