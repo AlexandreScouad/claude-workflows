@@ -7,6 +7,39 @@ name: Claude PR Review (Reusable)
 # - No untrusted input is used directly in run: blocks
 
 on:
+  # Direct dispatch from feedback-app (cross-org via /api/agent-callback/repo-token).
+  # Runs in this repo, operates on inputs.repo_full_name / inputs.pr_number.
+  workflow_dispatch:
+    inputs:
+      repo_full_name:
+        description: 'Target repo (owner/name)'
+        type: string
+        required: true
+      pr_number:
+        description: 'PR number on the target repo'
+        type: string
+        required: true
+      issue_number:
+        description: 'Linked feature issue number (Gate 4 label + callback)'
+        type: string
+        required: false
+      base_branch:
+        description: 'Branch checked out to read project docs'
+        type: string
+        default: 'recette'
+      project_name:
+        type: string
+        required: true
+      model:
+        type: string
+        default: 'claude-sonnet-4-6'
+      max_turns:
+        type: number
+        default: 15
+      extra_review_rules:
+        type: string
+        default: ''
+  # Thin-caller path (unchanged). Inputs empty -> fall back to github.event.*
   workflow_call:
     inputs:
       project_name:
@@ -33,7 +66,7 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 15
     concurrency:
-      group: claude-pr-review-${{ github.event.pull_request.number }}
+      group: claude-pr-review-${{ github.event.pull_request.number || inputs.pr_number }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -42,9 +75,80 @@ jobs:
       id-token: write
 
     steps:
+      # -- Fetch target-repo token (dispatch mode only) --
+      - name: Fetch target repo token
+        id: repo_token
+        if: inputs.repo_full_name != ''
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ inputs.repo_full_name }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::error::FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET requis (dispatch)"
+            exit 1
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"
+          NAME="${REPO_FULL_NAME##*/}"
+          RESP=$(curl -sS -X POST "$CALLBACK_URL/api/agent-callback/repo-token" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg o "$OWNER" --arg n "$NAME" '{owner:$o,repo:$n}')")
+          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then echo "::error::pas de token pour $REPO_FULL_NAME"; exit 1; fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      # -- Resolve context: repo / pr_number / head_ref across both modes --
+      - name: Resolve context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          INPUT_REPO: ${{ inputs.repo_full_name }}
+          INPUT_PR: ${{ inputs.pr_number }}
+          EVENT_REPO: ${{ github.repository }}
+          EVENT_PR: ${{ steps.ctx.outputs.pr_number }}
+          EVENT_HEAD: ${{ github.head_ref }}
+        run: |
+          if [ -n "$INPUT_REPO" ]; then
+            REPO="$INPUT_REPO"; PR="$INPUT_PR"
+            HEAD=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q '.headRefName')
+          else
+            REPO="$EVENT_REPO"; PR="$EVENT_PR"; HEAD="$EVENT_HEAD"
+          fi
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${REPO##*/}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$HEAD" >> "$GITHUB_OUTPUT"
+
+      # -- Report run id to feedback-app (dispatch only) --
+      - name: Report run id to feedback-app
+        if: inputs.repo_full_name != ''
+        continue-on-error: true
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ steps.ctx.outputs.repo }}
+          ISSUE_NUMBER: ${{ inputs.issue_number || steps.ctx.outputs.pr_number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then exit 0; fi
+          OWNER="${REPO_FULL_NAME%%/*}"; NAME="${REPO_FULL_NAME##*/}"
+          PAYLOAD=$(jq -nc --arg owner "$OWNER" --arg name "$NAME" \
+            --argjson issue "$ISSUE_NUMBER" --argjson runId "$RUN_ID" --arg runRepo "$RUN_REPO" \
+            '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,stage:"pr-review",status:"started",ghRunId:$runId,ghRunRepo:$runRepo}')
+          curl -sS -X POST "$CALLBACK_URL/api/agent-callback" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || echo "::warning::run-id report failed (non-blocking)"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          repository: ${{ steps.ctx.outputs.repo }}
+          ref: ${{ inputs.base_branch || github.base_ref }}
+          token: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
       - name: Get changed files
@@ -60,8 +164,8 @@ jobs:
             && echo "has_migration=true" >> $GITHUB_OUTPUT \
             || echo "has_migration=false" >> $GITHUB_OUTPUT
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
 
       - name: Detect linked issue
         id: issue
@@ -89,9 +193,9 @@ jobs:
             echo "has_test_plan=false" >> $GITHUB_OUTPUT
           fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
+          HEAD_REF: ${{ steps.ctx.outputs.head_ref }}
 
       - name: Discover docs
         if: steps.changes.outputs.skip != 'true'
@@ -107,12 +211,15 @@ jobs:
         if: steps.changes.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           allowed_bots: "makeplane[bot]"
+          # track_progress unsupported on workflow_dispatch; keep prior behaviour otherwise.
+          track_progress: ${{ github.event_name != 'workflow_dispatch' && 'true' || 'false' }}
           prompt: |
-            Review rigoureuse de la PR #${{ github.event.pull_request.number }} du projet ${{ inputs.project_name }}.
+            Review rigoureuse de la PR #${{ steps.ctx.outputs.pr_number }} du projet ${{ inputs.project_name }}.
 
             ## Fichiers modifies
             ```
@@ -121,8 +228,8 @@ jobs:
 
             ## Phase 1 — COLLECTE
 
-            1. `gh pr diff ${{ github.event.pull_request.number }}` — lire le diff complet
-            2. `gh pr view ${{ github.event.pull_request.number }}` — contexte PR
+            1. `gh pr diff ${{ steps.ctx.outputs.pr_number }}` — lire le diff complet
+            2. `gh pr view ${{ steps.ctx.outputs.pr_number }}` — contexte PR
             3. Lis les fichiers CLAUDE*.md pertinents :
             ${{ steps.docs.outputs.read_list }}
             4. Pour les fichiers complexes, Read le fichier entier pour comprendre le contexte
@@ -177,7 +284,7 @@ jobs:
             ## FORMAT — UN SEUL commentaire via `gh pr comment`
 
             ```markdown
-            ## 🔍 Review — PR #${{ github.event.pull_request.number }}
+            ## 🔍 Review — PR #${{ steps.ctx.outputs.pr_number }}
 
             ### Resume
             [2-3 phrases]
@@ -218,10 +325,10 @@ jobs:
       - name: Post gate-4 verdict label
         if: steps.changes.outputs.skip != 'true' && steps.issue.outputs.has_issue == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
           ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
-          REPO: ${{ github.repository }}
+          REPO: ${{ steps.ctx.outputs.repo }}
         run: |
           # Recupere le dernier commentaire de review (marqueur "Review — PR").
           # Le corps vient de l'API GitHub (donnee non fiable) : on le garde dans
@@ -252,9 +359,9 @@ jobs:
         env:
           AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
           FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL || 'https://feedback.scouad.fr' }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          ISSUE_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_OWNER: ${{ steps.ctx.outputs.owner }}
+          REPO_NAME: ${{ steps.ctx.outputs.name }}
+          ISSUE_NUMBER: ${{ inputs.issue_number || steps.ctx.outputs.pr_number }}
           STAGE: pr-review
           JOB_STATUS: ${{ job.status }}
         run: |
