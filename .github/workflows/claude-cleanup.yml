@@ -1,9 +1,37 @@
 name: Claude Branch Cleanup (Reusable)
 
 # SECURITY REVIEW:
-# - github.head_ref is used in env: var BRANCH (safe, not shell-interpolated)
+# - github.head_ref / inputs.head_ref used in env var BRANCH (safe, not shell-interpolated)
+# - Dual-mode: workflow_call (event payload) + workflow_dispatch (feedback-app,
+#   cross-org via /api/agent-callback/repo-token). Inputs empty in call mode ->
+#   fall back to github.event.* so existing behaviour is unchanged.
 
 on:
+  # Direct dispatch from feedback-app. Runs in this repo, operates on
+  # inputs.repo_full_name.
+  workflow_dispatch:
+    inputs:
+      repo_full_name:
+        description: 'Target repo (owner/name)'
+        type: string
+        required: true
+      head_ref:
+        description: 'Branch to delete (e.g. claude/issue-123)'
+        type: string
+        required: true
+      pr_number:
+        description: 'PR number (logs / concurrency only)'
+        type: string
+        required: false
+      base_branch:
+        description: 'Unused - kept for dispatch input parity'
+        type: string
+        default: 'recette'
+      project_name:
+        description: 'Human-readable project name for logs'
+        type: string
+        default: ''
+  # Thin-caller path (unchanged).
   workflow_call: {}
 
 jobs:
@@ -11,17 +39,47 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 5
     concurrency:
-      group: cleanup-${{ github.event.pull_request.number }}
+      group: cleanup-${{ github.event.pull_request.number || inputs.pr_number || inputs.head_ref }}
       cancel-in-progress: true
     permissions:
       contents: write
 
     steps:
-      - name: Delete merged branch
-        run: |
-          echo "Deleting branch: $BRANCH"
-          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" || true
+      # -- Fetch target-repo token (dispatch mode only) --
+      # The run lives in claude-workflows; its GITHUB_TOKEN can't touch the client
+      # repo. Fetch the per-owner token from feedback-app. Skipped in
+      # workflow_call (the caller's GITHUB_TOKEN already has access).
+      - name: Fetch target repo token
+        id: repo_token
+        if: inputs.repo_full_name != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          BRANCH: ${{ github.head_ref }}
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ inputs.repo_full_name }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::error::FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET requis pour le fetch du token cible (dispatch)"
+            exit 1
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"
+          NAME="${REPO_FULL_NAME##*/}"
+          RESP=$(curl -sS -X POST "$CALLBACK_URL/api/agent-callback/repo-token" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg o "$OWNER" --arg n "$NAME" '{owner:$o,repo:$n}')")
+          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::pas de token pour $REPO_FULL_NAME"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Delete merged branch
+        env:
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ inputs.repo_full_name || github.repository }}
+          BRANCH: ${{ inputs.head_ref || github.head_ref }}
+        run: |
+          echo "Deleting branch: $BRANCH on $REPO"
+          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" || true
