@@ -44,7 +44,7 @@ on:
       max_turns:
         description: 'Max Claude turns'
         type: number
-        default: 60
+        default: 100
       extra_prompt:
         description: 'Extra project-specific instructions appended to the prompt'
         type: string
@@ -83,7 +83,7 @@ on:
       max_turns:
         description: 'Max Claude turns'
         type: number
-        default: 60
+        default: 100
       extra_prompt:
         description: 'Extra project-specific instructions appended to the prompt'
         type: string
@@ -861,6 +861,22 @@ jobs:
             gh label create "estimate-ready" --repo "$REPO" --color "3B82F6" --description "Prêt pour estimation" 2>/dev/null || true
             gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "estimate-ready"
           fi
+
+      # ── Cleanup trigger label on failure ──
+      # « Swap labels » ne tourne qu'en succès : en échec (ex. max-turns
+      # atteint), `claude-ready` resterait posé sur l'issue. Conséquence : une
+      # régénération legacy (re-add du label) ne produit aucun événement
+      # `labeled` → relance silencieusement no-op (COCKP-1186). On retire donc
+      # le trigger dans tous les cas de sortie non-succès.
+      - name: Remove trigger label on failure
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
+          REPO: ${{ steps.ctx.outputs.repo }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "claude-ready" 2>/dev/null || true
 
       - name: Notify feedback-app (stage complete)
         if: always()
