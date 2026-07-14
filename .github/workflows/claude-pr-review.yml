@@ -35,7 +35,7 @@ on:
         default: 'claude-sonnet-4-6'
       max_turns:
         type: number
-        default: 15
+        default: 40
       extra_review_rules:
         type: string
         default: ''
@@ -50,7 +50,7 @@ on:
         default: 'claude-sonnet-4-6'
       max_turns:
         type: number
-        default: 15
+        default: 40
       extra_review_rules:
         description: 'Extra project-specific review rules'
         type: string
