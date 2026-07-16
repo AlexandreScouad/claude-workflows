@@ -370,8 +370,12 @@ jobs:
             exit 0
           fi
           case "$JOB_STATUS" in
-            success) STATUS="completed" ;;
-            *)       STATUS="failed" ;;
+            success)   STATUS="completed" ;;
+            # Annulation (concurrency:cancel-in-progress) ≠ échec — cf.
+            # COCKP-1197. On ne notifie rien : le run survivant enverra son
+            # propre callback.
+            cancelled) echo "::notice::job cancelled (concurrency) — pas de callback d'échec"; exit 0 ;;
+            *)         STATUS="failed" ;;
           esac
           PAYLOAD=$(jq -nc \
             --arg owner "$REPO_OWNER" \

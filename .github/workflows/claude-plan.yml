@@ -893,8 +893,15 @@ jobs:
             exit 0
           fi
           case "$JOB_STATUS" in
-            success) STATUS="completed" ;;
-            *)       STATUS="failed" ;;
+            success)   STATUS="completed" ;;
+            # Annulation (typiquement concurrency:cancel-in-progress quand un
+            # dispatch plus récent arrive pour la même issue) N'EST PAS un échec.
+            # La reporter en `failed` faisait afficher « génération du plan
+            # échouée » côté feedback-app alors qu'un run frère réussissait
+            # (COCKP-1197). On ne notifie rien : le run survivant enverra son
+            # propre callback (completed/failed).
+            cancelled) echo "::notice::job cancelled (concurrency) — pas de callback d'échec"; exit 0 ;;
+            *)         STATUS="failed" ;;
           esac
           OWNER="${REPO_FULL_NAME%%/*}"
           NAME="${REPO_FULL_NAME##*/}"
