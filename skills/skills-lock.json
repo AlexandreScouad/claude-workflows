@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "upstream": {
+    "mattpocock/skills": {
+      "pinnedRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "pinnedAt": "2026-07-21"
+    }
+  },
+  "skills": {
+    "caveman": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "221ffca96736",
+      "skillPath": "skills/productivity/caveman/SKILL.md",
+      "vendorPath": "skills/vendor/caveman",
+      "computedHash": "94179a41f76bb1e753644be3606951d35d17cac70d0e03a2c85f743a70872b1e",
+      "note": "Supprimée de l'upstream (commit 7d3ada9) — épinglée au dernier commit qui la contenait. Critère PR nº2 (minimalité)."
+    },
+    "code-review": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "skillPath": "skills/engineering/code-review/SKILL.md",
+      "vendorPath": "skills/vendor/code-review",
+      "computedHash": "6a65cc61114f96db07ec41e3920e67c9c5bf70dd6e0901eb9460ebcb2bdc209f"
+    },
+    "codebase-design": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "skillPath": "skills/engineering/codebase-design/SKILL.md",
+      "vendorPath": "skills/vendor/codebase-design",
+      "computedHash": "a8d50abac5a4018f60e1d911d4b6f4e36454ca14d6c390c0695a578c7de65dad"
+    },
+    "diagnosing-bugs": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "skillPath": "skills/engineering/diagnosing-bugs/SKILL.md",
+      "vendorPath": "skills/vendor/diagnosing-bugs",
+      "computedHash": "7a0779480f323a66d109404646bcc1a14bf0232b45b3e3ea93b652a035718acb",
+      "note": "Successeur upstream de « diagnose » (renommée). Le brief cite « diagnose » — c'est celle-ci."
+    },
+    "domain-modeling": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "skillPath": "skills/engineering/domain-modeling/SKILL.md",
+      "vendorPath": "skills/vendor/domain-modeling",
+      "computedHash": "152e2c97239affb12a60c5f4a7e74ab546a49ae169688c81f4e2ccc42dafa579"
+    },
+    "grilling": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "skillPath": "skills/productivity/grilling/SKILL.md",
+      "vendorPath": "skills/vendor/grilling",
+      "computedHash": "44331dda57f461db4fec3f2efb6ddabe7aaaa0a57ae0f88a883bc61aed8a0587"
+    },
+    "handoff": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "skillPath": "skills/productivity/handoff/SKILL.md",
+      "vendorPath": "skills/vendor/handoff",
+      "computedHash": "57c9f1f392d7352cdc85b1e39ca49eddc70ce1dc278bd9653fb4f23dfc2560fc"
+    },
+    "tdd": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "ed37663cc5fbef691ddfecd080dff42f7e7e350d",
+      "skillPath": "skills/engineering/tdd/SKILL.md",
+      "vendorPath": "skills/vendor/tdd",
+      "computedHash": "5363bb2775679fe9311fbb67947f95359169c6e7f1fac77c0f25e190bca6cf2f"
+    },
+    "zoom-out": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceRef": "221ffca96736",
+      "skillPath": "skills/engineering/zoom-out/SKILL.md",
+      "vendorPath": "skills/vendor/zoom-out",
+      "computedHash": "ef1a948aa2330919ab242e128d2b7beca8ef8ec8931c2c28f597cfc63b763e91",
+      "note": "Supprimée de l'upstream (commit e112a6b) — épinglée au dernier commit qui la contenait. Critère PR nº2 (minimalité)."
+    }
+  }
+}
