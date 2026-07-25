@@ -18,6 +18,10 @@ décrits. Compose la discipline `diagnosing-bugs` (Phase 1 — construire une
 boucle de feedback) avec un accès navigateur : ici la "boucle" **est** la
 session Playwright, pas un test à écrire.
 
+Lire `.claude/skills/_shared/clarification-axes.md` avant de construire le
+scénario — les axes Périmètre, Comportement et Conditions (1/2/3) cadrent ce
+qu'il faut extraire du ticket à l'étape 1.
+
 ## Contexte disponible au dispatch
 
 - Titre + description du ticket (`steps.ctx.outputs.title`/`body`) — inclut le
@@ -33,11 +37,18 @@ session Playwright, pas un test à écrire.
 
 ## Étape 1 — construire le scénario de repro
 
-Extraire du ticket : la page/le flux concerné, l'action précise qui déclenche
-le bug, le résultat attendu vs observé. Si le scénario est trop vague pour être
-rejoué mécaniquement (aucune action décrite, juste "ça marche pas"), ne pas
-deviner un scénario — verdict `not_reproduced` avec `reproTrace` expliquant
-pourquoi (le rebond client en Q&A demandera alors de préciser).
+Extraire du ticket, un axe à la fois :
+- **Périmètre (axe 1)** : la page/le flux concerné.
+- **Comportement (axe 2)** : l'action précise qui déclenche le bug, le
+  résultat attendu vs observé.
+- **Conditions (axe 3)** : sous quel rôle/compte/état ça se produit, si le
+  ticket le précise.
+
+Si un de ces axes est trop vague pour être rejoué mécaniquement (aucune
+action décrite, juste "ça marche pas"), ne pas deviner un scénario — verdict
+`not_reproduced` avec `reproTrace` expliquant lequel des trois axes manque
+(le rebond client en Q&A demandera alors de préciser cet axe précisément,
+pas "donne plus de détails").
 
 ## Étape 2 — rejouer via Playwright MCP
 

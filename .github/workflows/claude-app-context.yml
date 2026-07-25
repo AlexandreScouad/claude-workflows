@@ -1,0 +1,140 @@
+name: Claude App Context (Reusable)
+
+# SECURITY REVIEW:
+# - No untrusted input (no issue body/title involved — this workflow reads
+#   only the checked-out repo, never user-submitted text).
+# - Dispatch-only, one-shot per project (admin-triggered from feedback-app
+#   settings), not a per-ticket PipelineStage — no thin-caller, no
+#   pipeline_runs tracking. feedback-app POSTs `workflow_dispatch` directly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_full_name:
+        description: 'Target repo (owner/name)'
+        type: string
+        required: true
+      project_name:
+        type: string
+        required: true
+      base_branch:
+        description: 'Branch checked out to read project docs'
+        type: string
+        default: 'recette'
+      model:
+        type: string
+        default: 'claude-sonnet-4-6'
+      max_turns:
+        type: number
+        default: 15
+
+jobs:
+  app-context:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    concurrency:
+      group: claude-app-context-${{ inputs.repo_full_name }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # ── Fetch target-repo token — le run vit dans claude-workflows, son
+      # GITHUB_TOKEN ne touche pas le repo client (même pattern que
+      # claude-comprehension/claude-plan).
+      - name: Fetch target repo token
+        id: repo_token
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ inputs.repo_full_name }}
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::error::FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET requis pour le fetch du token cible"
+            exit 1
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"
+          NAME="${REPO_FULL_NAME##*/}"
+          RESP=$(curl -sS -X POST "$CALLBACK_URL/api/agent-callback/repo-token" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg o "$OWNER" --arg n "$NAME" '{owner:$o,repo:$n}')")
+          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::pas de token pour $REPO_FULL_NAME"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo_full_name }}
+          ref: ${{ inputs.base_branch }}
+          token: ${{ steps.repo_token.outputs.token }}
+          fetch-depth: 1
+
+      # ── Monter le catalogue de skills (skills/README.md "Montage") ──
+      - name: Monter le catalogue de skills
+        uses: actions/checkout@v4
+        with:
+          repository: AlexandreScouad/claude-workflows
+          ref: ${{ github.sha }}
+          path: .claude-workflows-skills
+          sparse-checkout: skills
+
+      - name: Installer les skills dans le workspace cible
+        run: |
+          mkdir -p .claude/skills
+          for src in .claude-workflows-skills/skills/vendor .claude-workflows-skills/skills; do
+            for d in "$src"/*/; do
+              name=$(basename "$d")
+              [ "$name" = "vendor" ] && continue
+              rm -rf ".claude/skills/$name"
+              cp -R "$d" ".claude/skills/$name"
+            done
+          done
+          rm -rf .claude-workflows-skills
+
+      - name: App context with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          settings: |
+            {"permissions":{"allow":["Glob","Grep","Read","Write"]}}
+          prompt: |
+            Résumé de contexte applicatif — projet ${{ inputs.project_name }},
+            repo ${{ inputs.repo_full_name }}.
+
+            Lis et suis `.claude/skills/app-context/SKILL.md`.
+
+            Écris **uniquement** `/tmp/app-context-result.json` (Write tool),
+            conforme au contrat de sortie du skill :
+            ```json
+            { "appContext": "..." }
+            ```
+          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+
+      - name: Publier le contexte applicatif
+        if: success()
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          REPO_FULL_NAME: ${{ inputs.repo_full_name }}
+        run: |
+          if [ ! -f /tmp/app-context-result.json ] || ! jq empty /tmp/app-context-result.json 2>/dev/null; then
+            echo "::error::app-context-result.json introuvable ou invalide"
+            exit 1
+          fi
+          OWNER="${REPO_FULL_NAME%%/*}"; NAME="${REPO_FULL_NAME##*/}"
+          RESULT=$(cat /tmp/app-context-result.json)
+          PAYLOAD=$(echo "$RESULT" | jq -c \
+            --arg owner "$OWNER" --arg name "$NAME" \
+            '. + {repo:{owner:$owner,name:$name}}')
+          curl -sS -X POST "$CALLBACK_URL/api/agent-callback/app-context" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            && echo "::notice::contexte applicatif publié" \
+            || { echo "::error::POST app-context échoué"; exit 1; }
