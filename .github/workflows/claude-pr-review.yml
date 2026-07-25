@@ -261,6 +261,8 @@ jobs:
           allowed_bots: "makeplane[bot]"
           # track_progress unsupported on workflow_dispatch; keep prior behaviour otherwise.
           track_progress: ${{ github.event_name != 'workflow_dispatch' && 'true' || 'false' }}
+          settings: |
+            {"permissions":{"allow":["Glob","Grep","Read","Write","Bash"]}}
           prompt: |
             Review de la PR #${{ steps.ctx.outputs.pr_number }} du projet ${{ inputs.project_name }} —
             chaîne de review des 6 critères.
