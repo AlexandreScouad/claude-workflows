@@ -7,8 +7,27 @@ touchpoint live côté extension (`qualify()`, feedback-app, texte + screenshot
 seuls) applique la même grille en miroir TypeScript — voir
 `src/lib/services/qualification/clarification-axes.ts` dans ce repo-là.
 
+Le miroir TypeScript (`clarification-axes.ts`, feedback-app) n'est **pas**
+un miroir fidèle : c'est une divergence de contenu assumée, pas seulement de
+format — il réduit l'axe 4 à "non applicable ici" au lieu de le porter en
+entier, et reformule les axes 1/2/3/5 pour tenir dans un prompt live. En
+éditant ce fichier, vérifier si le SENS de ces axes change côté
+`qualify()` ; ne pas viser une synchro texte-à-texte.
+
 Les trois touchpoints posent la même question — "a-t-on assez d'informations
 pour planifier/estimer ce ticket ?" — avec des sources de vérité différentes.
+Chaque section d'axe liste les trois colonnes "Sources par touchpoint" pour
+rester une référence complète, mais tu ne lis en pratique qu'une seule
+colonne selon qui t'invoque :
+
+- **`comprehension`** (accès code) → axes 1, 2, 3, 4. Toi seul traites
+  l'axe 4 (Cohérence code) — ne le laisse jamais aux deux autres.
+- **`verif-bug`** (accès navigateur) → axes 1, 2, 3. L'axe 5 se résout par
+  ton verdict lui-même, pas par une vérification séparée ; l'axe 4 ne te
+  concerne pas.
+- **`qualify()`** (texte/screenshot seuls, feedback-app) → axes 1, 2, 3, 5.
+  L'axe 4 t'est explicitement fermé — ne jamais prétendre le trancher.
+
 Pour chaque axe ci-dessous, la colonne "Sources" indique ce qui permet de le
 trancher à CE touchpoint (`comprehension` a le code, `verif-bug` a le
 navigateur, `qualify()` n'a ni l'un ni l'autre).

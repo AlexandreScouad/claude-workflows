@@ -3,9 +3,8 @@ name: app-context
 description: >
   Génère un résumé du contexte applicatif d'un repo client — ce que fait
   l'app, ses entités principales, son vocabulaire métier — pour peupler
-  `projects.appContext` (feedback-app). One-shot, déclenché manuellement par
-  l'admin depuis les réglages projet, jamais par ticket. Invoqué par le
-  workflow `claude-app-context.yml`.
+  `projects.appContext` (feedback-app). Invoqué par le workflow
+  `claude-app-context.yml`.
 ---
 
 # app-context — résumé applicatif pour la qualification live
