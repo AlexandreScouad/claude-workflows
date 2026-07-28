@@ -105,15 +105,24 @@ jobs:
           settings: |
             {"permissions":{"allow":["Glob","Grep","Read","Write"]}}
           prompt: |
-            Résumé de contexte applicatif — projet ${{ inputs.project_name }},
+            Contexte projet (métier + technique) — projet ${{ inputs.project_name }},
             repo ${{ inputs.repo_full_name }}.
 
-            Lis et suis `.claude/skills/app-context/SKILL.md`.
+            Lis et suis `.claude/skills/app-context/SKILL.md` (Partie 1 —
+            résumé applicatif, Partie 2 — contexte technique).
 
             Écris **uniquement** `/tmp/app-context-result.json` (Write tool),
             conforme au contrat de sortie du skill :
             ```json
-            { "appContext": "..." }
+            {
+              "appContext": "...",
+              "devContext": {
+                "architectureNotes": "...",
+                "testPatterns": ["..."],
+                "protectedPaths": ["..."],
+                "codeStyle": "..."
+              }
+            }
             ```
           claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
 
