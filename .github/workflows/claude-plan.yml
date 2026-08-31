@@ -594,8 +594,8 @@ jobs:
         # l'exécute hors du repo ($RUNNER_TEMP) pour ne rien polluer/committer.
         run: |
           REF="${{ github.job_workflow_sha || github.sha }}"
-          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.mjs" -o "$RUNNER_TEMP/report-usage.mjs" \
-            && node "$RUNNER_TEMP/report-usage.mjs" \
+          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.cjs" -o "$RUNNER_TEMP/report-usage.cjs" \
+            && node "$RUNNER_TEMP/report-usage.cjs" \
             || echo "::notice::report-usage skipped (download/parse failed)"
 
       # ── Extract confidence score (dual-format with legacy fallback) ──
@@ -622,6 +622,14 @@ jobs:
         run: |
           if [ ! -f PLAN.md ]; then
             echo "::error::PLAN.md introuvable — Claude n'a pas écrit le plan"
+            # Signal visible côté ticket : sans ce commentaire, cet échec ne
+            # laissait AUCUNE trace sur l'issue GitHub (COCKP-1237) — seul le
+            # board interne feedback-app le voyait, via le cron
+            # `runner-health`, bien plus tard. Best-effort, jamais bloquant :
+            # un `gh issue comment` qui échoue ne doit pas masquer l'erreur
+            # PLAN.md déjà loggée ci-dessus (`::error::` + `exit 1` inchangés).
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "⚠️ **Génération du plan interrompue** — Claude a terminé son analyse sans erreur applicative mais n'a produit aucun \`PLAN.md\`. Ce n'est pas un plantage classique (timeout, crash réseau) : relancer risque de reproduire exactement le même résultat si le contenu de l'issue n'a pas changé. Vérification manuelle recommandée avant de relancer. Run : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              || echo "::warning::commentaire d'échec plan non posté (non-bloquant)"
             exit 1
           fi
           PLAN_MD=$(cat PLAN.md)

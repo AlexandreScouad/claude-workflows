@@ -619,8 +619,8 @@ jobs:
           AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
         run: |
           REF="${{ github.job_workflow_sha || github.sha }}"
-          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.mjs" -o "$RUNNER_TEMP/report-usage.mjs" \
-            && node "$RUNNER_TEMP/report-usage.mjs" \
+          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.cjs" -o "$RUNNER_TEMP/report-usage.cjs" \
+            && node "$RUNNER_TEMP/report-usage.cjs" \
             || echo "::notice::report-usage (validation) skipped"
 
       # ── Parse plan validation result ──
@@ -833,8 +833,8 @@ jobs:
           AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
         run: |
           REF="${{ github.job_workflow_sha || github.sha }}"
-          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.mjs" -o "$RUNNER_TEMP/report-usage.mjs" \
-            && node "$RUNNER_TEMP/report-usage.mjs" \
+          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.cjs" -o "$RUNNER_TEMP/report-usage.cjs" \
+            && node "$RUNNER_TEMP/report-usage.cjs" \
             || echo "::notice::report-usage (implementation) skipped"
 
       - name: Lint fix (safety net)
