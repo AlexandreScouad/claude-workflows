@@ -35,6 +35,18 @@
  *   REPO                 owner/repo (github.repository du repo cible)
  *   FEEDBACK_APP_URL     base URL feedback-app
  *   AGENT_CALLBACK_SECRET bearer secret
+ *
+ * Détection limite d'usage (abonnement Claude, cf. investigation COCKP-1237) :
+ * en plus des tokens, on scanne `execution_file` pour des messages
+ * `rate_limit_event` (SDKRateLimitEvent — @anthropic-ai/claude-agent-sdk) et
+ * des erreurs de turn `rate_limit`/`overloaded`/`billing_error`/
+ * `account_on_hold`. C'est le SEUL endroit où ce signal est observable :
+ * `execution_file` vit sur le runner éphémère et n'est jamais persisté
+ * ailleurs — feedback-app ne peut pas le relire après coup. Si trouvé
+ * (status `allowed_warning`/`rejected`), posté à part dans le payload
+ * (`usageLimit`) pour finir dans l'historique du ticket, même quand 0 token
+ * n'a été consommé (un `rejected` bloque souvent l'appel AVANT toute
+ * consommation).
  */
 
 const { existsSync, readFileSync } = require("fs");
@@ -91,31 +103,81 @@ function postJson(urlStr, payload, headers) {
 }
 
 /**
- * Agrège les tokens des turns `assistant` (message.usage) et lit la durée du
- * turn `result`. Tolérant : retourne des zéros si le fichier est absent/invalide.
+ * Charge et parse `execution_file`. `[]` si absent/invalide (tolérant —
+ * chaque appelant retombe sur son propre défaut).
  */
-function parseTokens(path) {
-  const empty = {
-    model: process.env.CLAUDE_MODEL || "",
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheCreationTokens: 0,
-    cacheReadTokens: 0,
-    durationMs: 0,
-  };
+function loadTurns(path) {
   if (!path || !existsSync(path)) {
     warn(`execution_file absent: ${path}`);
-    return empty;
+    return [];
   }
-  let turns;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8"));
-    turns = Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed : [];
   } catch (e) {
     warn(`JSON invalide dans ${path}: ${e.message}`);
-    return empty;
+    return [];
+  }
+}
+
+/** Normalise `resetsAt` (SDK : epoch en secondes OU millisecondes selon la
+ * source) en ISO string. Heuristique standard : sous 10^12 → secondes. */
+function normalizeResetsAt(resetsAt) {
+  if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) return null;
+  const ms = resetsAt < 1e12 ? resetsAt * 1000 : resetsAt;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+const CONCERNING_ASSISTANT_ERRORS = new Set([
+  "rate_limit",
+  "overloaded",
+  "billing_error",
+  "account_on_hold",
+]);
+
+/**
+ * Scanne les turns pour un signal de limite d'usage à conserver :
+ * - le DERNIER `rate_limit_event` dont `status` est `allowed_warning`/`rejected`
+ *   (le SDK émet aussi des événements `allowed` purement informatifs, à
+ *   ignorer — sinon chaque run "sain" polluerait l'historique du ticket) ;
+ * - toute erreur de turn assistant dans `CONCERNING_ASSISTANT_ERRORS`.
+ * `null` si rien de notable (cas normal, immense majorité des runs).
+ */
+function detectUsageLimit(turns) {
+  let lastConcerning = null;
+  const assistantErrors = [];
+
+  for (const turn of turns) {
+    if (!turn || typeof turn !== "object") continue;
+    if (turn.type === "rate_limit_event" && turn.rate_limit_info) {
+      const info = turn.rate_limit_info;
+      if (info.status === "allowed_warning" || info.status === "rejected") {
+        lastConcerning = info;
+      }
+    }
+    const err = turn.message?.error;
+    if (typeof err === "string" && CONCERNING_ASSISTANT_ERRORS.has(err)) {
+      assistantErrors.push(err);
+    }
   }
 
+  if (!lastConcerning && assistantErrors.length === 0) return null;
+
+  return {
+    status: lastConcerning?.status ?? "rejected", // erreur de turn sans rate_limit_event associé → traiter comme rejeté
+    rateLimitType: lastConcerning?.rateLimitType ?? null,
+    resetsAt: normalizeResetsAt(lastConcerning?.resetsAt),
+    errorCode: lastConcerning?.errorCode ?? null,
+    assistantErrors: assistantErrors.length > 0 ? assistantErrors : null,
+  };
+}
+
+/**
+ * Agrège les tokens des turns `assistant` (message.usage) et lit la durée du
+ * turn `result`.
+ */
+function parseTokens(turns) {
   let model = process.env.CLAUDE_MODEL || "";
   let input = 0;
   let output = 0;
@@ -163,12 +225,19 @@ async function main() {
     return;
   }
 
-  const tokens = parseTokens(process.env.EXEC_FILE || "");
+  const turns = loadTurns(process.env.EXEC_FILE || "");
+  const tokens = parseTokens(turns);
   const total =
     tokens.inputTokens + tokens.outputTokens + tokens.cacheCreationTokens + tokens.cacheReadTokens;
-  if (total === 0) {
+  const usageLimit = detectUsageLimit(turns);
+  if (total === 0 && !usageLimit) {
     warn(`0 token parsé (step=${process.env.STEP_NAME}) — skip POST`);
     return;
+  }
+  if (usageLimit) {
+    warn(
+      `limite d'usage détectée (step=${process.env.STEP_NAME}): status=${usageLimit.status} type=${usageLimit.rateLimitType} resetsAt=${usageLimit.resetsAt}`,
+    );
   }
 
   const payload = {
@@ -183,6 +252,7 @@ async function main() {
     cacheCreationTokens: tokens.cacheCreationTokens,
     cacheReadTokens: tokens.cacheReadTokens,
     durationMs: tokens.durationMs,
+    ...(usageLimit ? { usageLimit } : {}),
   };
 
   const res = await postJson(`${base.replace(/\/$/, "")}/api/agent-callback/usage`, payload, {
