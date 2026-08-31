@@ -12,6 +12,13 @@
  * Tolérant : tout problème (fichier manquant, JSON invalide, réseau) → warn +
  * exit 0. Le tracking d'usage ne doit JAMAIS casser le pipeline.
  *
+ * CommonJS (`.cjs`) + `http(s)` natif au lieu de `fetch` — délibéré. Les
+ * runners self-hosted Coolify ne garantissent PAS un `node` moderne dans le
+ * `PATH` (vu en prod : un `node` sans support ESM, plantant sur `import … from`
+ * avec `SyntaxError: Unexpected token {` avant même d'atteindre `fetch`).
+ * `require()` + `http`/`https` fonctionnent sur n'importe quelle version de
+ * Node — ce script n'a aucun besoin d'API récente.
+ *
  * IMPORTANT (comptage correct) : claude-code-action réutilise le même chemin
  * execution_file entre invocations. Appeler ce script juste après CHAQUE step
  * claude, avec le steps.<id>.outputs.execution_file de CE step, et AVANT que le
@@ -30,10 +37,57 @@
  *   AGENT_CALLBACK_SECRET bearer secret
  */
 
-import { existsSync, readFileSync } from "node:fs";
+const { existsSync, readFileSync } = require("fs");
+const http = require("http");
+const https = require("https");
+const { URL } = require("url");
 
 function warn(msg) {
   process.stderr.write(`[report-usage] ${msg}\n`);
+}
+
+/**
+ * POST JSON minimal via http(s) natif (pas de `fetch` — indisponible sur les
+ * Node pré-18 qu'on peut rencontrer sur un runner self-hosted mal à jour).
+ * Résout avec { ok, status, body } comme un `Response` simplifié ; ne rejette
+ * jamais pour une erreur réseau (résolu avec ok:false à la place) — l'appelant
+ * reste tolérant sans avoir à distinguer try/catch réseau vs statut HTTP.
+ */
+function postJson(urlStr, payload, headers) {
+  return new Promise((resolve) => {
+    let url;
+    try {
+      url = new URL(urlStr);
+    } catch (e) {
+      resolve({ ok: false, status: 0, body: `URL invalide: ${e.message}` });
+      return;
+    }
+    const body = JSON.stringify(payload);
+    const client = url.protocol === "http:" ? http : https;
+    const req = client.request(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+          ...headers,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf-8");
+          const status = res.statusCode || 0;
+          resolve({ ok: status >= 200 && status < 300, status, body: text });
+        });
+      },
+    );
+    req.on("error", (e) => resolve({ ok: false, status: 0, body: e.message }));
+    req.write(body);
+    req.end();
+  });
 }
 
 /**
@@ -131,23 +185,14 @@ async function main() {
     durationMs: tokens.durationMs,
   };
 
-  try {
-    const res = await fetch(`${base.replace(/\/$/, "")}/api/agent-callback/usage`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${secret}`,
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      warn(`POST usage ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
-      return;
-    }
-    warn(`usage envoyé: ${total} tokens (${payload.model}, step=${payload.step})`);
-  } catch (e) {
-    warn(`POST usage échoué: ${e.message}`);
+  const res = await postJson(`${base.replace(/\/$/, "")}/api/agent-callback/usage`, payload, {
+    authorization: `Bearer ${secret}`,
+  });
+  if (!res.ok) {
+    warn(`POST usage ${res.status}: ${res.body.slice(0, 200)}`);
+    return;
   }
+  warn(`usage envoyé: ${total} tokens (${payload.model}, step=${payload.step})`);
 }
 
 main().catch((e) => {
