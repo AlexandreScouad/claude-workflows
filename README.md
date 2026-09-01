@@ -92,7 +92,7 @@ Les noms des champs sont configurables via les inputs `plane_plan_field_name` et
 | `base_branch` | string | `recette` | Branche de checkout |
 | `project_name` | string | *requis* | Nom du projet |
 | `auto_approve_threshold` | number | `60` | Seuil auto-approbation (bugs) |
-| `model` | string | `claude-opus-4-6` | Modele Claude |
+| `model` | string | `claude-opus-5` | Modele Claude |
 | `max_turns` | number | `50` | Turns max |
 | `extra_prompt` | string | `''` | Instructions specifiques |
 | `plane_plan_field_name` | string | `plan de correction` | Nom du champ Plane pour le plan |
@@ -108,7 +108,7 @@ Les noms des champs sont configurables via les inputs `plane_plan_field_name` et
 | `install_command` | string | `npm ci` | Commande d'install |
 | `lint_command` | string | `npm run lint:fix` | Commande lint fix |
 | `typecheck_command` | string | `npm run check-types` | Commande typecheck |
-| `model` | string | `claude-opus-4-6` | Modele Claude |
+| `model` | string | `claude-opus-5` | Modele Claude |
 | `max_turns` | number | `100` | Turns max |
 | `extra_prompt` | string | `''` | Instructions specifiques |
 | `plane_plan_field_name` | string | `plan de correction` | Nom du champ Plane pour le plan |
