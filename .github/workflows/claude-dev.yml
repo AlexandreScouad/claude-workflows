@@ -599,7 +599,7 @@ jobs:
             - Format de sortie : UNIQUEMENT `plan-validation.json`. Aucun autre output texte.
             - Une fois écrit, réponds simplement : "Validation terminée."
 
-          claude_args: '--model claude-sonnet-4-6 --max-turns 8'
+          claude_args: '--model claude-sonnet-5 --max-turns 8'
 
       # ── Tracking usage du step validation (Sonnet) → DB feedback-app ──
       # CRITIQUE : doit tourner AVANT le step Implement, qui réutilise le même
@@ -613,7 +613,7 @@ jobs:
           WORKFLOW_NAME: Claude Dev
           STEP_NAME: validate
           RUN_ID: ${{ github.run_id }}
-          CLAUDE_MODEL: claude-sonnet-4-6
+          CLAUDE_MODEL: claude-sonnet-5
           REPO: ${{ steps.ctx.outputs.repo }}
           FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
           AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}

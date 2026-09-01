@@ -121,7 +121,7 @@ Les noms des champs sont configurables via les inputs `plane_plan_field_name` et
 | `base_branch` | string | `recette` | Branche de checkout |
 | `project_name` | string | *requis* | Nom du projet |
 | `estimation_grid` | string | grille standard | Grille custom (markdown) |
-| `model` | string | `claude-sonnet-4-6` | Modele Claude |
+| `model` | string | `claude-sonnet-5` | Modele Claude |
 | `max_turns` | number | `30` | Turns max |
 | `extra_prompt` | string | `''` | Instructions specifiques |
 
@@ -130,7 +130,7 @@ Les noms des champs sont configurables via les inputs `plane_plan_field_name` et
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `project_name` | string | *requis* | Nom du projet |
-| `model` | string | `claude-sonnet-4-6` | Modele Claude |
+| `model` | string | `claude-sonnet-5` | Modele Claude |
 | `max_turns` | number | `15` | Turns max |
 | `extra_review_rules` | string | `''` | Regles de review specifiques |
 
