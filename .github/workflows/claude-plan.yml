@@ -40,7 +40,7 @@ on:
       model:
         description: 'Claude model to use'
         type: string
-        default: 'claude-opus-4-7'
+        default: 'claude-opus-5'
       max_turns:
         description: 'Max Claude turns'
         type: number
@@ -79,7 +79,7 @@ on:
       model:
         description: 'Claude model to use'
         type: string
-        default: 'claude-opus-4-7'
+        default: 'claude-opus-5'
       max_turns:
         description: 'Max Claude turns'
         type: number
