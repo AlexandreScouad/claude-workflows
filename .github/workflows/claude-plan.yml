@@ -371,6 +371,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
+          # DEBUG TEMPORAIRE (à retirer) : is_error:true systématique depuis
+          # 10h30 le 09/09 sur ce stage, message masqué par défaut — voir
+          # feedback-app#diag-blocked-tickets.
+          show_full_output: true
           settings: |
             {"permissions":{"allow":["Glob","Grep","Read","Write","Bash(git log *)","Bash(git diff *)","Bash(ls *)","Bash(cat *)","Bash(echo *)","Bash(printf *)","Bash(curl *)"]}}
           # track_progress n'est supporté que pour les events issue/PR — en mode
