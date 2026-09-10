@@ -433,19 +433,33 @@ jobs:
 
             ## Exploration ciblée du codebase
 
+            ⚠️ Contexte limité (200k tokens) — sur un gros repo, une exploration
+            non bornée le dépasse et fait échouer TOUT le run (aucun plan écrit).
+            Respecte ces règles strictement, même si ça semble limitant :
+
+            - **Ne lis jamais un fichier en entier par curiosité.** `Grep` avec
+              contexte (`-A`/`-B`/`-C`) d'abord ; `Read` seulement la zone précise
+              une fois la cible identifiée, jamais un fichier généré/volumineux
+              (lockfile, fixture, dump SQL, changelog...).
+            - **Un `Grep`/`Glob` qui retourne beaucoup de résultats = pattern
+              trop large.** Resserre-le immédiatement (chemin, extension, mot
+              plus spécifique) au lieu de lire les résultats un par un.
+            - **Limite dure : ≤8 fichiers lus en intégralité, ≤15 tours
+              d'exploration au total.** Si tu approches la limite sans avoir
+              tout couvert, écris le plan avec ce que tu as et liste les zones
+              non explorées dans "Risques" — un plan incomplet mais écrit vaut
+              toujours mieux qu'un run qui échoue sans rien produire.
+
             Identifie le type d'issue puis adapte ton exploration :
-            - **Bug UI/page** → Grep la page/route/composant. Cherche la **cause racine**, pas le symptôme.
-            - **Bug data/RPC** → Grep la fonction RPC dans `supabase/migrations/` et `src/`, identifie tous les appelants : `.rpc('xxx')`.
-            - **Nouvelle feature** → Trouve une feature similaire existante comme modèle, applique les patterns du projet.
-            - **Refactoring** → Grep large pour TOUS les usages du code concerné.
+            - **Bug UI/page** → Grep la page/route/composant précis. Cherche la **cause racine**, pas le symptôme.
+            - **Bug data/RPC** → Grep le nom exact de la fonction RPC dans `supabase/migrations/` et `src/`, identifie les appelants via `.rpc('xxx')` (pattern exact, pas un mot générique).
+            - **Nouvelle feature** → Trouve UNE feature similaire existante comme modèle (pas plusieurs), applique ses patterns.
+            - **Refactoring** → `Grep -l` d'abord (juste les noms de fichiers) pour mesurer l'ampleur, lis ensuite les fichiers les plus représentatifs seulement (pas tous).
 
-            Pour chaque zone modifiée, identifie les **dépendances en cascade** :
-            - RPC dépendantes (qui appelle qui)
-            - RLS policies impactées
-            - Composants/écrans qui partagent le code
-            - Tests existants qui couvrent ce code
-
-            Budget : **≤15 tours d'exploration**.
+            Pour chaque zone modifiée, identifie les **dépendances en cascade**
+            (RPC dépendantes, RLS policies impactées, composants/écrans qui
+            partagent le code, tests existants) — par `Grep` ciblé, pas en
+            relisant des fichiers déjà vus.
 
             ## Template OBLIGATOIRE pour `PLAN.md`
 
