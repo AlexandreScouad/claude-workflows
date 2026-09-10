@@ -264,6 +264,17 @@ jobs:
           token: ${{ steps.repo_token.outputs.token || secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
+      # ── Config MCP vide pour --strict-mcp-config ──
+      # Fichier plutôt que JSON inline dans claude_args : le JSON inline se
+      # fait retokeniser (guillemets perdus) par le parseur shell-quote du
+      # champ claude_args et finit interprété comme un chemin littéral.
+      - name: Write empty MCP config
+        if: steps.check-approved.outputs.skip != 'true'
+        id: empty_mcp
+        run: |
+          echo '{"mcpServers":{}}' > "$RUNNER_TEMP/empty-mcp.json"
+          echo "path=$RUNNER_TEMP/empty-mcp.json" >> "$GITHUB_OUTPUT"
+
       - name: Discover project docs
         if: steps.check-approved.outputs.skip != 'true'
         id: docs
@@ -618,7 +629,7 @@ jobs:
           # d'outils dans le contexte — alors que "plan" n'en a besoin
           # d'aucun (juste Glob/Grep/Read/Write). Root cause de "Prompt is
           # too long" en boucle sur ce repo. Voir feedback-app#diag-blocked-tickets.
-          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config {"mcpServers":{}}'
+          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
 
       # ── Tracking consommation tokens → DB feedback-app ──
       # Parse le execution_file de CE step et POST les tokens à feedback-app, qui
