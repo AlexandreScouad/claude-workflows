@@ -378,17 +378,12 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
-          # DEBUG TEMPORAIRE #3 (à retirer) : toujours is_error après retrait
-          # curl/cat/git — besoin du message réel pour voir si c'est encore
-          # "Prompt is too long" (donc pas les tools Bash) ou autre chose.
-          show_full_output: true
-          # curl/cat/git log-diff retirés (09-10/09) : contexte qui explosait
-          # "Prompt is too long" sur ce stage — suspect n°1 = curl sur un lien
-          # de screenshot signé (présent dans CHAQUE ISSUE_BODY), qui rapatrie
-          # des octets binaires bruts dans le contexte. cat/git n'ont pas la
-          # pagination du tool Read et ne sont pas requis par les instructions
-          # d'exploration ci-dessous (Grep/Glob/Read suffisent). Voir
-          # feedback-app#diag-blocked-tickets.
+          # curl/cat/git log-diff retirés (09-10/09) : bonne pratique de toute
+          # façon (curl sur un lien de screenshot signé, cat/git non bornés),
+          # mais n'a PAS résolu "Prompt is too long" à lui seul — cause réelle
+          # probable : .claude/settings.local.json + .claude/activity.log
+          # committés (et gitignorés !) sur le repo cible, chargés via
+          # settingSources local. Voir feedback-app#diag-blocked-tickets.
           settings: |
             {"permissions":{"allow":["Glob","Grep","Read","Write","Bash(ls *)","Bash(echo *)","Bash(printf *)"]}}
           # track_progress n'est supporté que pour les events issue/PR — en mode
