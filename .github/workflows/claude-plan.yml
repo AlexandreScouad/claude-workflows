@@ -607,7 +607,18 @@ jobs:
             - Si scope trop large, découpe en sous-issues (proposer dans Executive Summary)
             - RPC : SEARCH → REUSE → ADAPT → CREATE (privilégier la réutilisation)
 
-          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+          # --strict-mcp-config + --mcp-config vide : désactive les serveurs
+          # MCP du repo cible pour ce stage. claude-code-action force
+          # `enableAllProjectMcpServers: true` de façon INCONDITIONNELLE
+          # (impossible à annuler via `settings:`, voir
+          # setup-claude-code-settings.ts) — sur un repo avec un .mcp.json
+          # lourd (ex. cockpit-octave-telecom : 2× Supabase + Playwright
+          # ~25 outils + chrome-devtools), ça fait tourner `npx -y ...@latest`
+          # pour CHAQUE serveur à chaque run et injecte tous leurs schémas
+          # d'outils dans le contexte — alors que "plan" n'en a besoin
+          # d'aucun (juste Glob/Grep/Read/Write). Root cause de "Prompt is
+          # too long" en boucle sur ce repo. Voir feedback-app#diag-blocked-tickets.
+          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config {"mcpServers":{}}'
 
       # ── Tracking consommation tokens → DB feedback-app ──
       # Parse le execution_file de CE step et POST les tokens à feedback-app, qui
