@@ -355,7 +355,13 @@ jobs:
       - name: Generate plan with Claude
         id: generate-plan
         if: steps.check-approved.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@v1
+        # Épinglé sur v1.0.217 (au lieu du tag flottant @v1) : v1.0.219 (tag v1
+        # redirigé le 08/09 23:57 UTC, bump @anthropic-ai/claude-agent-sdk
+        # 0.3.263→0.3.266) casse ce stage — tout run échoue en 1 tour avec
+        # "Prompt is too long" (invalid_request), peu importe le ticket/modèle.
+        # Revenir à @v1 (ou une version ≥ où c'est corrigé) une fois le
+        # correctif confirmé côté anthropics/claude-code-action.
+        uses: anthropics/claude-code-action@v1.0.217
         env:
           ISSUE_TITLE: ${{ steps.ctx.outputs.title }}
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
@@ -371,10 +377,6 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
-          # DEBUG TEMPORAIRE (à retirer) : is_error:true systématique depuis
-          # 10h30 le 09/09 sur ce stage, message masqué par défaut — voir
-          # feedback-app#diag-blocked-tickets.
-          show_full_output: true
           settings: |
             {"permissions":{"allow":["Glob","Grep","Read","Write","Bash(git log *)","Bash(git diff *)","Bash(ls *)","Bash(cat *)","Bash(echo *)","Bash(printf *)","Bash(curl *)"]}}
           # track_progress n'est supporté que pour les events issue/PR — en mode
