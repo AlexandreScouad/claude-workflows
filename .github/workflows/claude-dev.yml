@@ -533,6 +533,23 @@ jobs:
           echo "tdd_mode=$IS_BUG" >> "$GITHUB_OUTPUT"
           echo "TDD mode (bug label): $IS_BUG"
 
+      # ── Config MCP vide pour --strict-mcp-config ──
+      # Même correctif que claude-plan.yml (commits 78068706/695012a8) : sans
+      # ça, claude-code-action force enableAllProjectMcpServers: true de façon
+      # inconditionnelle, donc le .mcp.json du repo cible se charge à chaque
+      # run (ex. cockpit-octave-telecom : 2× Supabase + Playwright + chrome-
+      # devtools, ~25 outils). Aucune allow-list ci-dessous n'autorise un outil
+      # mcp__*, donc tout appel est refusé sans recours — c'est la cause
+      # identifiée de l'échec #2048 (permission_denials_count: 2, implémentation
+      # bloquée sans aucun commit). Fichier plutôt que JSON inline : le JSON
+      # inline se fait retokeniser par le parseur shell-quote de claude_args.
+      - name: Write empty MCP config
+        if: steps.check-existing.outputs.skip != 'true'
+        id: empty_mcp
+        run: |
+          echo '{"mcpServers":{}}' > "$RUNNER_TEMP/empty-mcp.json"
+          echo "path=$RUNNER_TEMP/empty-mcp.json" >> "$GITHUB_OUTPUT"
+
       # ── Phase 0: Validate plan covers issue ──
       # Lightweight Claude Sonnet invocation (≤8 turns) that reads issue.md + IMPL_PLAN.md
       # and emits plan-validation.json. If invalid, the Implement step is skipped.
@@ -599,7 +616,9 @@ jobs:
             - Format de sortie : UNIQUEMENT `plan-validation.json`. Aucun autre output texte.
             - Une fois écrit, réponds simplement : "Validation terminée."
 
-          claude_args: '--model claude-sonnet-5 --max-turns 8'
+          # --strict-mcp-config + --mcp-config vide : voir "Write empty MCP
+          # config" ci-dessus (#2048).
+          claude_args: '--model claude-sonnet-5 --max-turns 8 --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
 
       # ── Tracking usage du step validation (Sonnet) → DB feedback-app ──
       # CRITIQUE : doit tourner AVANT le step Implement, qui réutilise le même
@@ -815,7 +834,9 @@ jobs:
 
             ${{ inputs.extra_prompt }}
 
-          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+          # --strict-mcp-config + --mcp-config vide : voir "Write empty MCP
+          # config" ci-dessus (#2048).
+          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
 
       # ── Tracking usage du step implementation (Opus) → DB feedback-app ──
       # Le step validation a déjà été persisté plus haut (avant cet écrasement).
