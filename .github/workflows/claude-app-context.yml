@@ -23,7 +23,7 @@ on:
         default: 'recette'
       model:
         type: string
-        default: 'claude-sonnet-5'
+        default: 'claude-sonnet-5-5'
       max_turns:
         type: number
         default: 15

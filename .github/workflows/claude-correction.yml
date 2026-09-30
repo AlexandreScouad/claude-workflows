@@ -26,10 +26,10 @@ on:
         type: string
         required: true
       model:
-        description: 'Claude model id (e.g. claude-sonnet-5, claude-opus-5-5).'
+        description: 'Claude model id (e.g. claude-sonnet-5-5, claude-opus-5-5).'
         type: string
         required: false
-        default: 'claude-sonnet-5'
+        default: 'claude-sonnet-5-5'
       max_turns:
         description: 'Max turns budget for the Claude correction step.'
         type: string

@@ -618,12 +618,12 @@ jobs:
 
           # --strict-mcp-config + --mcp-config vide : voir "Write empty MCP
           # config" ci-dessus (#2048).
-          claude_args: '--model claude-sonnet-5 --max-turns 8 --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
+          claude_args: '--model claude-sonnet-5-5 --max-turns 8 --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
 
       # ── Tracking usage du step validation (Sonnet) → DB feedback-app ──
       # CRITIQUE : doit tourner AVANT le step Implement, qui réutilise le même
       # chemin execution_file et l'écraserait (sinon les tokens Sonnet de la
-      # validation seraient recomptés comme Opus). Modèle figé = sonnet-5.
+      # validation seraient recomptés comme Opus). Modèle figé = sonnet-5-5.
       - name: Report Claude usage (validation)
         if: always() && steps.check-existing.outputs.skip != 'true' && steps.validate-plan.outputs.execution_file != ''
         env:
@@ -632,7 +632,7 @@ jobs:
           WORKFLOW_NAME: Claude Dev
           STEP_NAME: validate
           RUN_ID: ${{ github.run_id }}
-          CLAUDE_MODEL: claude-sonnet-5
+          CLAUDE_MODEL: claude-sonnet-5-5
           REPO: ${{ steps.ctx.outputs.repo }}
           FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
           AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
