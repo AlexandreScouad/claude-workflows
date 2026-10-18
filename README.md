@@ -11,6 +11,7 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 | `claude-estimate.yml` | `estimate-ready` | Estimation T-shirt sizing + sync Plane |
 | `claude-pr-review.yml` | PR opened / `review-ready` | Review automatique de la PR |
 | `claude-cleanup.yml` | PR merged | Supprime la branche `claude/issue-*` |
+| `auto-test.yml` | `workflow_dispatch` (feedback-app) | Test automatique d'une PR sur sa preview (Claude Code headless + Playwright), verdict signé vers feedback-app |
 
 ## Utilisation
 
@@ -27,6 +28,7 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 | `CLAUDE_CODE_OAUTH_TOKEN` | Oui | Authentification Claude Code Action |
 | `PLANE_API_TOKEN` | Non | Integration Plane (plan stocke dans custom fields) |
 | `TELEGRAM_BOT_TOKEN` | Non | Notifications Telegram (estimations) |
+| `AUTO_TEST_WEBHOOK_SECRET` | Pour `auto-test` | Secret partagé avec feedback-app (contexte, captures, webhook HMAC) |
 
 ### 3. Variables repo (Settings > Variables)
 
@@ -36,6 +38,7 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 | `PLANE_BASE_URL` | Plane integration | `https://api.plane.so` |
 | `PLANE_WORKSPACE` | Plane integration | `scouad` |
 | `PLANE_PROJECT_ID` | Plane integration | `uuid-du-projet` |
+| `FEEDBACK_APP_URL` | auto-test | `https://feedback.scouad.fr` |
 
 ### 4. Ajouter a un projet
 
@@ -137,6 +140,23 @@ Les noms des champs sont configurables via les inputs `plane_plan_field_name` et
 ### claude-cleanup.yml
 
 Aucun input — declenche par le caller quand une PR `claude/issue-*` est mergee.
+
+### auto-test.yml
+
+Lance par l'orchestrateur de feedback-app (jamais par label). Code dans `auto-test/` (Node 24, TypeScript execute tel quel, sans build).
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `project_id` | string | UUID du projet feedback-app |
+| `ticket_key` | string | Cle du ticket |
+| `run_id` | string | UUID du run (`ticket_auto_tests.id`) |
+| `head_sha` | string | Version de la PR testee |
+| `forced` | boolean | Lancement force par un admin |
+
+- Agent : `claude -p` (version epinglee par `auto-test/package-lock.json`), `claude-sonnet-5-5`, effort `high`, 80 tours, conclusion forcee par `--resume` si la limite est atteinte. Seuls outils : serveur MCP `scouad-test` (`auto-test/src/mcp-server.ts`).
+- Depot public : aucune sortie de l'agent dans les logs, aucun artefact, identifiants recuperes par le serveur MCP et masques.
+- Quota d'abonnement atteint : evenement `waiting_quota`, sortie en succes (feedback-app relance).
+- Tests : `cd auto-test && npm ci && npm test && npm run typecheck`.
 
 ## Chaine de labels
 

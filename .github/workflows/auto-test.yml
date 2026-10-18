@@ -1,0 +1,101 @@
+name: Auto Test
+
+# Test automatique d'une PR « à tester » (feedback-app #505, carte #501) :
+# Claude Code headless (abonnement, CLAUDE_CODE_OAUTH_TOKEN) pilote un
+# Chromium headless via le serveur MCP `scouad-test` (auto-test/) sur la
+# preview du ticket, puis poste son verdict signé à feedback-app.
+#
+# Déclenché UNIQUEMENT par workflow_dispatch depuis l'orchestrateur de
+# feedback-app (qui gère la file : un test à la fois par projet).
+#
+# DÉPÔT PUBLIC — logs Actions publics :
+# - aucune sortie de l'agent n'est affichée (stream dans $RUNNER_TEMP, jamais
+#   uploadé : pas d'actions/upload-artifact) ;
+# - les entrées sont lues dans l'événement par le script, pas dans `env:`
+#   (le bloc env d'un step est affiché dans le log) ;
+# - les chemins d'auto-login reçus du contexte sont masqués (::add-mask::).
+#
+# Secrets : CLAUDE_CODE_OAUTH_TOKEN, AUTO_TEST_WEBHOOK_SECRET.
+# Variable : FEEDBACK_APP_URL (ex. https://feedback.scouad.fr).
+
+run-name: auto-test ${{ inputs.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: 'UUID du projet feedback-app'
+        type: string
+        required: true
+      ticket_key:
+        description: 'Clé du ticket (ex. COCKP-1234)'
+        type: string
+        required: true
+      run_id:
+        description: 'UUID du run (ticket_auto_tests.id)'
+        type: string
+        required: true
+      head_sha:
+        description: 'Version de la PR testée'
+        type: string
+        required: true
+      forced:
+        description: 'Lancement forcé par un admin (test express non automatisable)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: auto-test-${{ inputs.project_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  auto-test:
+    # Runner GitHub éphémère (comme visual-regression) : rien ne survit au job,
+    # et `--with-deps` peut installer les bibliothèques système de Chromium.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout claude-workflows (auto-test/ seulement)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: auto-test
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: auto-test/package-lock.json
+
+      - name: Install dependencies (Claude Code épinglé par le lockfile)
+        working-directory: auto-test
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        working-directory: auto-test
+        run: npx playwright install --with-deps chromium
+
+      - name: Run auto-test
+        working-directory: auto-test
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          AUTO_TEST_WEBHOOK_SECRET: ${{ secrets.AUTO_TEST_WEBHOOK_SECRET }}
+          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+        run: node --disable-warning=ExperimentalWarning src/run.ts
+
+      # Filet : aucun événement final remis (install en échec, crash, job
+      # coupé par timeout-minutes) → verdict non concluant, pour que le run ne
+      # reste pas « en cours ». Sans effet si le verdict est déjà parti.
+      - name: Fallback verdict
+        if: failure() || cancelled()
+        working-directory: auto-test
+        env:
+          AUTO_TEST_WEBHOOK_SECRET: ${{ secrets.AUTO_TEST_WEBHOOK_SECRET }}
+          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: node --disable-warning=ExperimentalWarning src/fallback.ts "$JOB_STATUS"
