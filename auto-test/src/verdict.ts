@@ -4,7 +4,7 @@
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { ActionEntry } from "./run-dir.ts";
-import { finalCapturePath, listCaptures, markTerminal, readActions, readTerminal, runPaths } from "./run-dir.ts";
+import { finalCapturePath, listCaptures, markTerminal, readActions, readRunnerReservations, readTerminal, runPaths } from "./run-dir.ts";
 import { postEvent, uploadCapture, type AutoTestEvent, type FeedbackAppConfig } from "./feedback-app.ts";
 
 export type AgentStatut = "ok" | "ko" | "non_concluant";
@@ -88,6 +88,7 @@ export async function sendVerdict(
   const event = buildVerdictEvent({
     runId: ctx.runId,
     ...v,
+    reservations: [...v.reservations, ...readRunnerReservations(ctx.runDir).filter((r) => !v.reservations.includes(r))],
     actions: readActions(ctx.runDir),
     captures,
     durationMs: Date.now() - ctx.startedAt,

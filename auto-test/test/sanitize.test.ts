@@ -36,3 +36,13 @@ test("::add-mask:: une ligne par valeur, sans valeur courte", () => {
   const lines = maskCommands(["abc", "assez-long"]);
   assert.deepEqual(lines, ["::add-mask::assez-long"]);
 });
+
+test("les paramètres non identifiants (redirect, remember) ne sont pas masqués", () => {
+  const values = secretValuesOf(["/fr/sign-in?redirect=%2Ffr%2Fdashboard&remember=true&email=x%40acme.fr&password=Abcd1234"]);
+  assert.ok(!values.includes("/fr/dashboard"));
+  assert.ok(!values.includes("true"));
+  assert.ok(values.includes("Abcd1234"));
+  assert.ok(values.includes("x@acme.fr"));
+  const clean = createSanitizer(values);
+  assert.equal(clean("Retour au /fr/dashboard"), "Retour au /fr/dashboard");
+});

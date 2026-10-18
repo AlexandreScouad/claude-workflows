@@ -17,6 +17,8 @@ export function runPaths(runDir: string) {
     terminal: join(runDir, "terminal.json"),
     /** Verdict construit mais pas remis (erreur réseau) : le runner le renvoie. */
     pending: join(runDir, "pending-event.json"),
+    /** Réserves ajoutées par le runner (ex. version du brief), fusionnées au verdict. */
+    reservations: join(runDir, "runner-reservations.json"),
     streamMain: join(runDir, "stream.jsonl"),
     streamConclusion: join(runDir, "stream-conclusion.jsonl"),
     stderr: join(runDir, "claude-stderr.log"),
@@ -79,5 +81,20 @@ export function readTerminal(runDir: string): TerminalMarker | null {
     return JSON.parse(readFileSync(file, "utf8")) as TerminalMarker;
   } catch {
     return null;
+  }
+}
+
+export function writeRunnerReservations(runDir: string, reservations: readonly string[]): void {
+  writeFileSync(runPaths(runDir).reservations, JSON.stringify(reservations), { mode: 0o600 });
+}
+
+export function readRunnerReservations(runDir: string): string[] {
+  const file = runPaths(runDir).reservations;
+  if (!existsSync(file)) return [];
+  try {
+    const v: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
   }
 }

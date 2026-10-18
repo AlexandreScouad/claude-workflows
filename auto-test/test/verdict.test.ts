@@ -59,3 +59,16 @@ test("arguments de claude : outils fermés, pas de --bare", () => {
   const resume = claudeArgs({ prompt: "y", model: "m", effort: "high", maxTurns: 3, mcpConfig: "/c", allowedTools: "a", resume: "sess-1" });
   assert.ok(resume.join(" ").includes("--max-turns 3 --resume sess-1"));
 });
+
+test("ligne de connexion tirée de l'événement init", async () => {
+  const { describeInit } = await import("../src/claude.ts");
+  const line = describeInit({
+    type: "system",
+    subtype: "init",
+    apiKeySource: "none",
+    model: "claude-sonnet-5-5",
+    mcp_servers: [{ name: "scouad-test", status: "connected" }],
+    tools: ["mcp__scouad-test__lire", "mcp__scouad-test__verdict"],
+  });
+  assert.equal(line, "MCP scouad-test : connected, 2 outil(s) MCP / 2 · apiKeySource none · modèle claude-sonnet-5-5");
+});

@@ -16,8 +16,13 @@ async function main(): Promise<number> {
   const cause = process.argv[2] === "cancelled" ? "cancelled" : "failure";
   const inputs = readInputs(process.env);
   const config = feedbackAppConfig(process.env);
-  if (typeof inputs === "string" || typeof config === "string") {
-    say("repli impossible : entrées ou configuration invalides");
+  if (typeof config === "string") {
+    say("repli impossible : configuration invalide");
+    return 1;
+  }
+  if (typeof inputs === "string") {
+    // run.ts a déjà signalé les entrées invalides si run_id était utilisable.
+    say("repli : entrées invalides, rien de plus à envoyer");
     return 1;
   }
   const runDir = runDirFor(process.env, inputs.runId);

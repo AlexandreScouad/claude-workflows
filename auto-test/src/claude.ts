@@ -56,6 +56,8 @@ export type ClaudeRun = {
   numTurns: number | null;
   quota: QuotaHit | null;
   timedOut: boolean;
+  /** Faits de connexion de l'événement init (loggables : aucun contenu de l'agent). */
+  init: string | null;
 };
 
 export type ClaudeArgs = {
@@ -83,6 +85,21 @@ export function claudeArgs(a: ClaudeArgs): string[] {
   ];
 }
 
+/**
+ * « MCP scouad-test : connected, 10 outils · apiKeySource none » —
+ * `apiKeySource: none` = facturation sur l'abonnement (pas de clé API).
+ */
+export function describeInit(ev: Record<string, unknown>): string {
+  const servers = Array.isArray(ev.mcp_servers) ? ev.mcp_servers : [];
+  const mcp = servers
+    .map((s) => (typeof s === "object" && s !== null ? (s as { name?: unknown; status?: unknown }) : {}))
+    .map((s) => `${String(s.name ?? "?")} : ${String(s.status ?? "?")}`)
+    .join(", ");
+  const tools = Array.isArray(ev.tools) ? ev.tools.filter((t) => typeof t === "string") : [];
+  const mcpTools = tools.filter((t) => t.startsWith("mcp__")).length;
+  return `MCP ${mcp || "(aucun)"}, ${mcpTools} outil(s) MCP / ${tools.length} · apiKeySource ${String(ev.apiKeySource ?? "?")} · modèle ${String(ev.model ?? "?")}`;
+}
+
 /** Événements où un message de quota peut apparaître (pas les résultats d'outils : texte des pages testées). */
 const QUOTA_EVENT_TYPES = new Set(["result", "assistant", "system", "error"]);
 
@@ -91,7 +108,7 @@ export function runClaude(opts: { args: string[]; env: NodeJS.ProcessEnv; cwd: s
     const child = spawn(CLAUDE_BIN, opts.args, { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] });
     const stream = createWriteStream(opts.streamFile, { flags: "a", mode: 0o600 });
     const stderr = createWriteStream(opts.stderrFile, { flags: "a", mode: 0o600 });
-    const run: ClaudeRun = { exitCode: null, sessionId: null, resultSubtype: null, numTurns: null, quota: null, timedOut: false };
+    const run: ClaudeRun = { exitCode: null, sessionId: null, resultSubtype: null, numTurns: null, quota: null, timedOut: false, init: null };
     let buf = "";
     let errTail = "";
 
@@ -104,6 +121,7 @@ export function runClaude(opts: { args: string[]; env: NodeJS.ProcessEnv; cwd: s
         ev = null;
       }
       if (ev && typeof ev.session_id === "string" && !run.sessionId) run.sessionId = ev.session_id;
+      if (ev?.type === "system" && ev.subtype === "init" && !run.init) run.init = describeInit(ev);
       if (ev?.type === "result") {
         run.resultSubtype = typeof ev.subtype === "string" ? ev.subtype : null;
         run.numTurns = typeof ev.num_turns === "number" ? ev.num_turns : null;

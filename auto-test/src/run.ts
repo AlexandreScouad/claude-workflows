@@ -26,11 +26,11 @@ import {
 } from "./config.ts";
 import { usableRoles } from "./context.ts";
 import { fetchContext, postEvent, type FeedbackAppConfig } from "./feedback-app.ts";
-import { feedbackAppConfig, readInputs, runDirFor, type RunInputs } from "./inputs.ts";
+import { feedbackAppConfig, readInputs, readRunId, runDirFor, type RunInputs } from "./inputs.ts";
 import { buildPrompt, CONCLUSION_PROMPT, TOOL_PREFIX } from "./prompt.ts";
-import { ensureRunDir, readTerminal, runPaths } from "./run-dir.ts";
+import { ensureRunDir, readTerminal, runPaths, writeRunnerReservations } from "./run-dir.ts";
 import { maskCommands, secretValuesOf } from "./sanitize.ts";
-import { deliver, flushPending, sendVerdict } from "./verdict.ts";
+import { buildVerdictEvent, deliver, flushPending, sendVerdict } from "./verdict.ts";
 
 const say = (msg: string) => console.log(`[auto-test] ${msg}`);
 
@@ -48,13 +48,14 @@ const CONTEXT_REASONS: Record<string, string> = {
 async function main(): Promise<number> {
   const startedAt = Date.now();
   const inputs = readInputs(process.env);
-  if (typeof inputs === "string") {
-    say(`entrées invalides : ${inputs}`);
-    return 1;
-  }
   const config = feedbackAppConfig(process.env);
   if (typeof config === "string") {
     say(config);
+    return 1;
+  }
+  if (typeof inputs === "string") {
+    say(`entrées invalides : ${inputs}`);
+    await rejectInvalidInputs(config, inputs);
     return 1;
   }
   const runDir = runDirFor(process.env, inputs.runId);
@@ -106,6 +107,8 @@ async function main(): Promise<number> {
   if (context.headSha && !context.headSha.startsWith(inputs.headSha) && !inputs.headSha.startsWith(context.headSha)) {
     reservations.push("Le résumé du ticket a été généré sur une autre version de la PR que celle demandée.");
   }
+  // Fusionnées à tout verdict, y compris celui de l'outil verdict (serveur MCP).
+  writeRunnerReservations(runDir, reservations);
 
   // 4. Agent
   writeMcpConfig(p.mcpConfig, config, inputs, runDir, startedAt);
@@ -131,12 +134,13 @@ async function main(): Promise<number> {
     stderrFile: p.stderr,
     deadlineMs: deadline - Date.now(),
   });
+  say(first.init ? `connexion : ${first.init}` : "connexion : pas d'événement init (MCP ou CLI en échec ?)");
   say(describe("agent terminé", first));
   const afterFirst = await settle(config, runDir, inputs, first);
   if (afterFirst !== null) return afterFirst;
 
   if (first.timedOut) {
-    await send("inconclusive", "Le test a dépassé le temps imparti avant que l'agent ne rende son verdict.", "temps dépassé", reservations);
+    await send("inconclusive", "Le test a dépassé le temps imparti avant que l'agent ne rende son verdict.", "temps dépassé");
     say("verdict de repli envoyé (temps dépassé)");
     return 0;
   }
@@ -166,7 +170,6 @@ async function main(): Promise<number> {
       ? `L'agent a atteint la limite de ${MAX_TURNS} tours sans rendre de verdict.`
       : "L'agent s'est arrêté sans rendre de verdict.",
     reason,
-    reservations,
   );
   say(`verdict de repli envoyé (${reason})`);
   return 0;
@@ -197,6 +200,24 @@ async function settle(config: FeedbackAppConfig, runDir: string, inputs: RunInpu
     return 0;
   }
   return null;
+}
+
+/** Entrées invalides mais run_id utilisable : le run ne doit pas rester « en file ». */
+async function rejectInvalidInputs(config: FeedbackAppConfig, why: string): Promise<void> {
+  const runId = readRunId(process.env);
+  if (!runId) return;
+  const runDir = runDirFor(process.env, runId);
+  ensureRunDir(runDir);
+  await deliver(config, runDir, buildVerdictEvent({
+    runId,
+    status: "inconclusive",
+    summary: "Le test n'a pas pu démarrer : paramètres de lancement invalides.",
+    reservations: [],
+    reason: `entrées invalides (${why})`,
+    actions: [],
+    captures: [],
+    durationMs: 0,
+  }));
 }
 
 function describe(label: string, r: ClaudeRun): string {

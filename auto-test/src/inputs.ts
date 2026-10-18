@@ -44,6 +44,19 @@ export function readInputs(env: NodeJS.ProcessEnv): RunInputs | string {
   });
 }
 
+/** run_id seul (pour signaler des entrées invalides sur le bon run). */
+export function readRunId(env: NodeJS.ProcessEnv): string | null {
+  let raw: unknown = env.RUN_ID;
+  if (env.GITHUB_EVENT_PATH) {
+    try {
+      raw = (JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) as { inputs?: Record<string, unknown> }).inputs?.run_id;
+    } catch {
+      return null;
+    }
+  }
+  return typeof raw === "string" && UUID_RE.test(raw.trim()) ? raw.trim() : null;
+}
+
 export function feedbackAppConfig(env: NodeJS.ProcessEnv): FeedbackAppConfig | string {
   const baseUrl = env.FEEDBACK_APP_URL?.trim();
   const secret = env.AUTO_TEST_WEBHOOK_SECRET;
