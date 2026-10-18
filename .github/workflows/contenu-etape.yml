@@ -10,9 +10,16 @@ name: Contenu — étape agent
 # - Les inputs (etape, piece_id, run_id, tour) sont validés par regex dans le
 #   premier step avant tout usage ; jamais interpolés tels quels dans un `run:`.
 # - Aucun secret ni réseau dans la portée de Claude : pas de MCP
-#   (--strict-mcp-config + config vide), outils = Read/Write/Glob/Grep et
-#   Bash(cat|echo|printf). scouad-os est extrait avec persist-credentials: false
-#   (le jeton ne reste pas dans .git/config) et sans .claude/.
+#   (--strict-mcp-config + config vide), aucun Bash ; Read limité au répertoire
+#   de travail (la règle Read s'applique aussi à Glob et Grep : toute lecture
+#   hors du workspace est refusée), écriture limitée à sortie.json (les règles
+#   Edit(...) couvrent l'outil Write). Vérifié en local par des sondes. scouad-os est extrait avec persist-credentials: false (le jeton
+#   ne reste pas dans .git/config) et sans .claude/ ; les fichiers temporaires du
+#   dossier sont effacés avant Claude.
+# - Pas d'OIDC (id-token) : claude-code-action reçoit le GITHUB_TOKEN du run,
+#   en lecture seule.
+# - Risque résiduel : runner auto-hébergé partagé, non éphémère (comme toute la
+#   suite claude-workflows).
 # - AGENT_CALLBACK_SECRET ne sert qu'aux steps « dossier » et « dépôt ».
 # - Les clés de `materiau` / `sources` du dossier sont refusées si elles
 #   contiennent `/` ou `..` (pas d'écriture hors de dossier/).
@@ -52,7 +59,6 @@ jobs:
 
     permissions:
       contents: read
-      id-token: write
 
     env:
       FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
@@ -141,9 +147,10 @@ jobs:
           done
           echo "Dossier :"; find dossier -type f | sort
 
-      - name: Config MCP vide
+      - name: Config MCP vide, temporaires effacés
         id: empty_mcp
         run: |
+          rm -f "$RUNNER_TEMP/dossier.json" "$RUNNER_TEMP/d.json"
           echo '{"mcpServers":{}}' > "$RUNNER_TEMP/empty-mcp.json"
           echo "path=$RUNNER_TEMP/empty-mcp.json" >> "$GITHUB_OUTPUT"
 
@@ -153,8 +160,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           settings: |
-            {"permissions":{"allow":["Glob","Grep","Read","Write","Bash(cat *)","Bash(echo *)","Bash(printf *)"]}}
+            {"permissions":{"allow":["Glob","Grep","Read(./**)","Edit(./sortie.json)"],"deny":["Bash","WebFetch","WebSearch","NotebookEdit","Task","Read(//etc/**)"]}}
           prompt: |
             Tu es l'étape agent « ${{ steps.params.outputs.etape }} » du rituel contenu de Scouad.
             Lis 02.marketing/skills/production-contenu/SKILL.md et applique la section de ton étape.
@@ -167,8 +175,8 @@ jobs:
             --max-turns 40
             --strict-mcp-config
             --mcp-config ${{ steps.empty_mcp.outputs.path }}
-            --allowedTools "Bash(cat *),Bash(echo *),Bash(printf *),Glob,Grep,Read,Write"
-            --disallowedTools "WebFetch,WebSearch,Edit,MultiEdit,NotebookEdit,Task"
+            --allowedTools "Read(./**),Edit(./sortie.json),Glob,Grep"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task"
 
       # ── Dépôt ──
       - name: Déposer la sortie
