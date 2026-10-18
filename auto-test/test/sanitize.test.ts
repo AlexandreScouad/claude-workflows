@@ -37,7 +37,18 @@ test("::add-mask:: une ligne par valeur, sans valeur courte", () => {
   assert.deepEqual(lines, ["::add-mask::assez-long"]);
 });
 
-test("les paramètres non identifiants (redirect, remember) ne sont pas masqués", () => {
+test("fail-closed : un paramètre au nom neutre est masqué", () => {
+  const values = secretValuesOf(["/auto?k=supersecret&lang=fr-FR#t=fragsecret"]);
+  assert.ok(values.includes("supersecret"));
+  assert.ok(values.includes("fragsecret"));
+  assert.ok(!values.includes("fr-FR"), "lang est en liste blanche");
+  const clean = createSanitizer(values);
+  assert.ok(!clean('erreur en ouvrant "/auto?k=supersecret"').includes("supersecret"));
+  assert.ok(maskCommands(values).includes("::add-mask::supersecret"));
+  assert.ok(maskCommands(values).includes("::add-mask::/auto?k=supersecret&lang=fr-FR#t=fragsecret"));
+});
+
+test("liste blanche seulement (redirect, remember) : valeurs lisibles", () => {
   const values = secretValuesOf(["/fr/sign-in?redirect=%2Ffr%2Fdashboard&remember=true&email=x%40acme.fr&password=Abcd1234"]);
   assert.ok(!values.includes("/fr/dashboard"));
   assert.ok(!values.includes("true"));

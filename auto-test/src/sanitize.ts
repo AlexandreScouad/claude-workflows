@@ -22,16 +22,25 @@ function safeDecode(s: string): string {
   }
 }
 
-/** Clés de paramètre porteuses d'identifiants (cf. buildLoginPath de feedback-app). */
-const CREDENTIAL_KEY_RE = /pass|pwd|mdp|mail|login|user|token|secret|key|code|otp|auth/i;
+/**
+ * Clés INOFFENSIVES dont la valeur reste lisible. Tout le reste est masqué
+ * (fail-closed) : un identifiant porté par un paramètre au nom inattendu
+ * (`k=…`) ne doit jamais fuir dans les logs publics.
+ */
+const HARMLESS_KEYS = new Set(["redirect", "next", "lang", "locale", "remember"]);
+
+function addVariants(out: Set<string>, value: string): void {
+  if (!value) return;
+  out.add(value);
+  out.add(safeDecode(value));
+  out.add(encodeURIComponent(safeDecode(value)));
+}
 
 /**
- * Valeurs à masquer pour des chemins d'auto-login : chemin complet et valeur
- * de chaque paramètre d'identifiant (email, mot de passe, jeton…), brutes et
- * décodées (un masque n'attrape qu'une sous-chaîne exacte). Les autres
- * paramètres (`redirect=/fr/dashboard`, `remember=true`) ne sont pas masqués :
- * ils rendraient « [compte] » chaque occurrence de « /fr/dashboard » ou
- * « true » dans les pages lues. Valeurs de moins de 4 caractères ignorées.
+ * Valeurs à masquer pour des chemins d'auto-login : chemin complet, valeur de
+ * CHAQUE paramètre de query (sauf liste blanche HARMLESS_KEYS) et fragment,
+ * brutes et décodées (un masque n'attrape qu'une sous-chaîne exacte).
+ * Valeurs de moins de 4 caractères ignorées.
  */
 export function secretValuesOf(loginPaths: ReadonlyArray<string | null | undefined>): string[] {
   const out = new Set<string>();
@@ -39,15 +48,22 @@ export function secretValuesOf(loginPaths: ReadonlyArray<string | null | undefin
     if (!path) continue;
     out.add(path);
     out.add(safeDecode(path));
-    const q = path.indexOf("?");
+    const h = path.indexOf("#");
+    const beforeHash = h < 0 ? path : path.slice(0, h);
+    if (h >= 0) {
+      const fragment = path.slice(h + 1);
+      addVariants(out, fragment);
+      for (const pair of fragment.split("&")) addVariants(out, pair.includes("=") ? pair.slice(pair.indexOf("=") + 1) : pair);
+    }
+    const q = beforeHash.indexOf("?");
     if (q < 0) continue;
-    for (const pair of path.slice(q + 1).split(/[&#]/)) {
-      const value = pair.slice(pair.indexOf("=") + 1);
-      if (!pair.includes("=") || !value) continue;
-      if (!CREDENTIAL_KEY_RE.test(safeDecode(pair.slice(0, pair.indexOf("="))))) continue;
-      out.add(value);
-      out.add(safeDecode(value));
-      out.add(encodeURIComponent(safeDecode(value)));
+    for (const pair of beforeHash.slice(q + 1).split("&")) {
+      if (!pair) continue;
+      const eq = pair.indexOf("=");
+      const key = eq < 0 ? "" : safeDecode(pair.slice(0, eq)).trim().toLowerCase();
+      const value = eq < 0 ? pair : pair.slice(eq + 1);
+      if (HARMLESS_KEYS.has(key)) continue;
+      addVariants(out, value);
     }
   }
   return [...out].filter((v) => v.length >= 4).sort((a, b) => b.length - a.length);
