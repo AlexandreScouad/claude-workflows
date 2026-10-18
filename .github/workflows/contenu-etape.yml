@@ -1,0 +1,215 @@
+name: Contenu — étape agent
+
+# Une étape agent du rituel contenu de Scouad (feedback-app#401, #481).
+# Adaptateur mince : la brique Rituels de Feedback App choisit l'unité, ouvre le
+# run et dispatche ce workflow ; ici on récupère le dossier, on lance Claude Code
+# en fichiers seuls sur la skill `production-contenu` de scouad-os, et on dépose
+# `sortie.json`. Contrat : feedback-app `docs/agents/rituels-contrat.md`.
+#
+# SECURITY REVIEW:
+# - Les inputs (etape, piece_id, run_id, tour) sont validés par regex dans le
+#   premier step avant tout usage ; jamais interpolés tels quels dans un `run:`.
+# - Aucun secret ni réseau dans la portée de Claude : pas de MCP
+#   (--strict-mcp-config + config vide), outils = Read/Write/Glob/Grep et
+#   Bash(cat|echo|printf). scouad-os est extrait avec persist-credentials: false
+#   (le jeton ne reste pas dans .git/config) et sans .claude/.
+# - AGENT_CALLBACK_SECRET ne sert qu'aux steps « dossier » et « dépôt ».
+# - Les clés de `materiau` / `sources` du dossier sont refusées si elles
+#   contiennent `/` ou `..` (pas d'écriture hors de dossier/).
+# - claude-code-action exige que ce fichier soit identique sur `main` : il ne se
+#   teste pas sur une branche.
+
+on:
+  workflow_dispatch:
+    inputs:
+      etape:
+        description: "Étape agent (veilleur, briefeur, redacteur, relecteur, declineur, publieur, mesureur, recycleur)"
+        type: string
+        required: true
+      piece_id:
+        description: "Pièce visée (vide pour un tour d'horloge)"
+        type: string
+        default: ""
+      run_id:
+        description: "Run ouvert par la brique (uuid agent_runs)"
+        type: string
+        required: true
+      tour:
+        description: "Tour d'horloge (vide pour une pièce)"
+        type: string
+        default: ""
+
+jobs:
+  etape:
+    runs-on: self-hosted
+    # La brique clôt en erreur un run sans dépôt après 45 min.
+    timeout-minutes: 40
+
+    # Un run à la fois sur le rituel contenu (décision #371).
+    concurrency:
+      group: contenu-etape
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+      RUN_ID: ${{ inputs.run_id }}
+      ETAPE: ${{ inputs.etape }}
+
+    steps:
+      # ── Entrées et modèle ──
+      - name: Valider les entrées et choisir le modèle
+        id: params
+        env:
+          PIECE_ID: ${{ inputs.piece_id }}
+          TOUR: ${{ inputs.tour }}
+        run: |
+          UUID='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          if ! [[ "$RUN_ID" =~ $UUID ]]; then echo "::error::run_id invalide"; exit 1; fi
+          if [ -n "$PIECE_ID" ] && ! [[ "$PIECE_ID" =~ $UUID ]]; then echo "::error::piece_id invalide"; exit 1; fi
+          if [ -n "$TOUR" ] && ! [[ "$TOUR" =~ ^[a-z0-9_]{1,40}$ ]]; then echo "::error::tour invalide"; exit 1; fi
+          case "$ETAPE" in
+            redacteur|relecteur|declineur) MODEL="claude-opus-5-5" ;;
+            veilleur|briefeur|publieur|mesureur|recycleur) MODEL="claude-sonnet-5-5" ;;
+            *) echo "::error::étape inconnue : $ETAPE"; exit 1 ;;
+          esac
+          { echo "model=$MODEL"; echo "etape=$ETAPE"; echo "debut=$(date +%s)"; } >> "$GITHUB_OUTPUT"
+          if [ -z "$FEEDBACK_APP_URL" ]; then echo "::error::variable FEEDBACK_APP_URL manquante"; exit 1; fi
+
+      # ── scouad-os (jeton par org, comme les autres workflows) ──
+      - name: Jeton scouad-os
+        id: os_token
+        env:
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+        run: |
+          if [ -z "$CALLBACK_SECRET" ]; then echo "::error::secret AGENT_CALLBACK_SECRET manquant"; exit 1; fi
+          RESP=$(curl -sS -X POST "$FEEDBACK_APP_URL/api/agent-callback/repo-token" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"owner":"AlexandreScouad","repo":"scouad-os"}')
+          TOKEN=$(echo "$RESP" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then echo "::error::pas de jeton pour scouad-os"; exit 1; fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout scouad-os (sans identifiants)
+        uses: actions/checkout@v4
+        with:
+          repository: AlexandreScouad/scouad-os
+          token: ${{ steps.os_token.outputs.token }}
+          persist-credentials: false
+          clean: true
+
+      - name: Retirer .claude/ de scouad-os
+        run: rm -rf .claude sortie.json dossier
+
+      # ── Dossier ──
+      - name: Récupérer le dossier
+        env:
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+        run: |
+          HTTP=$(curl -sS -o "$RUNNER_TEMP/dossier.json" -w '%{http_code}' \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            "$FEEDBACK_APP_URL/api/agent-callback/rituels/runs/$RUN_ID/dossier")
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::dossier : HTTP $HTTP"; head -c 500 "$RUNNER_TEMP/dossier.json"; exit 1
+          fi
+          # La route répond { success: true, data: dossier }.
+          jq -e '.success == true and (.data | type == "object")' "$RUNNER_TEMP/dossier.json" > /dev/null || { echo "::error::dossier illisible"; exit 1; }
+          jq '.data' "$RUNNER_TEMP/dossier.json" > "$RUNNER_TEMP/d.json"
+          mkdir -p dossier/materiau dossier/sources
+          jq '.unite' "$RUNNER_TEMP/d.json" > dossier/unite.json
+          ecrire() { # $1 = clé jq (materiau|sources), $2 = sous-dossier, $3 = brut (texte) ou json
+            jq -r --arg c "$1" '.[$c] // {} | keys[]' "$RUNNER_TEMP/d.json" | while IFS= read -r k; do
+              case "$k" in */*|*..*|.*|"") echo "::error::nom de fichier refusé : $k"; exit 1 ;; esac
+              if [ "$3" = "brut" ]; then
+                jq -r --arg c "$1" --arg k "$k" '.[$c][$k]' "$RUNNER_TEMP/d.json" > "dossier/$2/$k"
+              else
+                jq --arg c "$1" --arg k "$k" '.[$c][$k]' "$RUNNER_TEMP/d.json" > "dossier/$2/$k"
+              fi
+            done
+          }
+          ecrire materiau materiau brut
+          ecrire sources sources json
+          # Copie depuis scouad-os ; un fichier absent ne fait pas échouer le run.
+          jq -r '.materiau_scouad_os // [] | .[]' "$RUNNER_TEMP/d.json" | while IFS= read -r p; do
+            case "$p" in /*|*..*|.claude/*) echo "::warning::chemin refusé : $p"; continue ;; esac
+            if [ -f "$p" ]; then cp "$p" "dossier/materiau/$(basename "$p")"; else echo "::notice::absent de scouad-os : $p"; fi
+          done
+          echo "Dossier :"; find dossier -type f | sort
+
+      - name: Config MCP vide
+        id: empty_mcp
+        run: |
+          echo '{"mcpServers":{}}' > "$RUNNER_TEMP/empty-mcp.json"
+          echo "path=$RUNNER_TEMP/empty-mcp.json" >> "$GITHUB_OUTPUT"
+
+      # ── Claude Code, fichiers seuls ──
+      - name: Étape agent
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          settings: |
+            {"permissions":{"allow":["Glob","Grep","Read","Write","Bash(cat *)","Bash(echo *)","Bash(printf *)"]}}
+          prompt: |
+            Tu es l'étape agent « ${{ steps.params.outputs.etape }} » du rituel contenu de Scouad.
+            Lis 02.marketing/skills/production-contenu/SKILL.md et applique la section de ton étape.
+            Le dossier du run est dans dossier/ (commence par dossier/unite.json).
+            Écris ta sortie, et seulement elle, dans le fichier sortie.json à la racine du répertoire de travail.
+          # `allowed_tools` n'est pas une entrée de claude-code-action v1 (ignorée en silence) :
+          # la restriction passe par --allowedTools / --disallowedTools.
+          claude_args: |
+            --model ${{ steps.params.outputs.model }}
+            --max-turns 40
+            --strict-mcp-config
+            --mcp-config ${{ steps.empty_mcp.outputs.path }}
+            --allowedTools "Bash(cat *),Bash(echo *),Bash(printf *),Glob,Grep,Read,Write"
+            --disallowedTools "WebFetch,WebSearch,Edit,MultiEdit,NotebookEdit,Task"
+
+      # ── Dépôt ──
+      - name: Déposer la sortie
+        if: always() && steps.params.outcome == 'success'
+        env:
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          DEBUT: ${{ steps.params.outputs.debut }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          DUREE=$(( $(date +%s) - DEBUT ))
+          # Coût lu dans execution_file (tour « result » de claude-code-action) ; null si absent.
+          COUT='null'
+          if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
+            COUT=$(jq -c --argjson d "$DUREE" '
+              (map(select(.type == "assistant") | .message.usage // {}) ) as $u
+              | (map(select(.type == "result")) | last) as $r
+              | { tokens_in: ([$u[] | (.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)] | add // null),
+                  tokens_out: ([$u[] | .output_tokens // 0] | add // null),
+                  cost_usd: ($r.total_cost_usd // null),
+                  duree_s: $d }' "$EXEC_FILE" 2>/dev/null || echo 'null')
+          fi
+          if [ -f sortie.json ] && jq -e 'type == "object"' sortie.json > /dev/null 2>&1; then
+            SORTIE=$(cat sortie.json)
+          else
+            # Pas de sortie lisible : on clôt proprement en échec plutôt que d'attendre 45 min.
+            MOTIF="pas de sortie.json lisible (étape Claude : ${CLAUDE_OUTCOME:-non lancée})"
+            SORTIE=$(jq -nc --arg r "$RUN_ID" --arg e "$ETAPE" --arg m "$MOTIF" '{run_id:$r, etape:$e, statut:"echec", motif:$m}')
+          fi
+          BODY=$(jq -nc --argjson s "$SORTIE" --argjson c "$COUT" '{sortie:$s, cout:$c}')
+          HTTP=$(curl -sS -o "$RUNNER_TEMP/depot.json" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $CALLBACK_SECRET" -H "Content-Type: application/json" \
+            --data-binary "$BODY" \
+            "$FEEDBACK_APP_URL/api/agent-callback/rituels/runs/$RUN_ID/depot")
+          echo "Dépôt : HTTP $HTTP"; head -c 1000 "$RUNNER_TEMP/depot.json"; echo
+          case "$HTTP" in
+            200) ;;
+            409) echo "::notice::run déjà clos ou pièce déplacée : pas de nouvel essai" ;;
+            *) echo "::error::dépôt refusé (HTTP $HTTP)"; exit 1 ;;
+          esac
+
+      - name: Nettoyer
+        if: always()
+        run: rm -rf dossier sortie.json "$RUNNER_TEMP/dossier.json" "$RUNNER_TEMP/d.json" "$RUNNER_TEMP/depot.json"
