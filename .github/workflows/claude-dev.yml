@@ -61,7 +61,15 @@ on:
       model:
         description: 'Claude model'
         type: string
-        default: 'claude-opus-5-5'
+        default: 'claude-sonnet-5-5'
+      effort:
+        description: 'Reasoning effort of the implement step (low|medium|high|xhigh|max). Sans flag, Sonnet 5.5 tourne en medium.'
+        type: string
+        default: 'high'
+      advisor:
+        description: "Advisor model consulted by the implement step (opus|fable|model id). Vide = pas d'advisor."
+        type: string
+        default: 'opus'
       max_turns:
         description: 'Max Claude turns'
         type: number
@@ -123,7 +131,15 @@ on:
       model:
         description: 'Claude model'
         type: string
-        default: 'claude-opus-5-5'
+        default: 'claude-sonnet-5-5'
+      effort:
+        description: 'Reasoning effort of the implement step (low|medium|high|xhigh|max). Sans flag, Sonnet 5.5 tourne en medium.'
+        type: string
+        default: 'high'
+      advisor:
+        description: "Advisor model consulted by the implement step (opus|fable|model id). Vide = pas d'advisor."
+        type: string
+        default: 'opus'
       max_turns:
         description: 'Max Claude turns'
         type: number
@@ -836,7 +852,7 @@ jobs:
 
           # --strict-mcp-config + --mcp-config vide : voir "Write empty MCP
           # config" ci-dessus (#2048).
-          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
+          claude_args: '--model ${{ inputs.model }} --effort ${{ inputs.effort }}${{ inputs.advisor != '''' && format('' --advisor {0}'', inputs.advisor) || '''' }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
 
       # ── Tracking usage du step implementation (Opus) → DB feedback-app ──
       # Le step validation a déjà été persisté plus haut (avant cet écrasement).
