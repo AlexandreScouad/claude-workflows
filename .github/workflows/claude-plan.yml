@@ -41,6 +41,10 @@ on:
         description: 'Claude model to use'
         type: string
         default: 'claude-opus-5-5'
+      effort:
+        description: 'Reasoning effort (low|medium|high|xhigh|max). Plan = qualité critique → max par défaut (sans flag, Opus 5.5 tourne en medium).'
+        type: string
+        default: 'max'
       max_turns:
         description: 'Max Claude turns'
         type: number
@@ -80,6 +84,10 @@ on:
         description: 'Claude model to use'
         type: string
         default: 'claude-opus-5-5'
+      effort:
+        description: 'Reasoning effort (low|medium|high|xhigh|max). Plan = qualité critique → max par défaut (sans flag, Opus 5.5 tourne en medium).'
+        type: string
+        default: 'max'
       max_turns:
         description: 'Max Claude turns'
         type: number
@@ -629,7 +637,7 @@ jobs:
           # d'outils dans le contexte — alors que "plan" n'en a besoin
           # d'aucun (juste Glob/Grep/Read/Write). Root cause de "Prompt is
           # too long" en boucle sur ce repo. Voir feedback-app#diag-blocked-tickets.
-          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
+          claude_args: '--model ${{ inputs.model }} --effort ${{ inputs.effort }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
 
       # ── Tracking consommation tokens → DB feedback-app ──
       # Parse le execution_file de CE step et POST les tokens à feedback-app, qui
