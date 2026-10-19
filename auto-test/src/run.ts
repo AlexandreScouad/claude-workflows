@@ -24,7 +24,7 @@ import {
   MCP_SERVER_NAME,
   MODEL,
 } from "./config.ts";
-import { usableRoles } from "./context.ts";
+import { resolveAccounts } from "./context.ts";
 import { fetchContext, postEvent, type FeedbackAppConfig } from "./feedback-app.ts";
 import { feedbackAppConfig, readInputs, readRunId, runDirFor, type RunInputs } from "./inputs.ts";
 import { buildPrompt, CONCLUSION_PROMPT, TOOL_PREFIX } from "./prompt.ts";
@@ -85,7 +85,8 @@ async function main(): Promise<number> {
   }
   const context = ctx.context;
   for (const line of maskCommands(secretValuesOf(context.accounts.map((a) => a.loginPath)))) console.log(line);
-  say(`contexte reçu (${usableRoles(context.accounts).length} compte(s), ${context.detailedSteps.length} étape(s) détaillée(s))`);
+  const resolved = resolveAccounts(context);
+  say(`contexte reçu (${resolved.roles.length} compte(s), ${context.detailedSteps.length} étape(s) détaillée(s))`);
 
   // 3. started
   const started = await postEvent(config, {
@@ -117,7 +118,8 @@ async function main(): Promise<number> {
     ticketType: context.ticketType,
     brief: context.brief,
     detailedSteps: context.detailedSteps,
-    roles: usableRoles(context.accounts),
+    roles: resolved.roles,
+    startRole: context.startRole ? resolved.start : null,
     fixtures: context.fixtures.map((f) => f.name),
     maxTurns: MAX_TURNS,
     forced: inputs.forced,

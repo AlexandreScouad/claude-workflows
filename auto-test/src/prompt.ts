@@ -8,6 +8,8 @@ export type PromptInput = {
   brief: { problem: string | null; cause: string | null; fix: string | null; quickTest: string | null };
   detailedSteps: readonly string[];
   roles: readonly string[];
+  /** Compte de départ annoncé (servi par feedback-app) ; null = ancien libellé « admin ». */
+  startRole?: string | null;
   fixtures: readonly string[];
   maxTurns: number;
   forced: boolean;
@@ -18,7 +20,7 @@ export const TOOL_PREFIX = "mcp__scouad-test__";
 export function buildPrompt(p: PromptInput): string {
   const lines = [
     `Tu es un testeur QA. Tu vérifies un correctif sur la preview (environnement de recette) d'une application web, avec les outils ${TOOL_PREFIX}* uniquement.`,
-    "Le premier appel d'outil ouvre la preview et te connecte avec le compte « admin ». Commence par lire la page, puis déroule le test express.",
+    `Le premier appel d'outil ouvre la preview et te connecte avec le compte « ${p.startRole ?? "admin"} ». Commence par lire la page, puis déroule le test express.`,
     "Les éléments marqués (cliquable) sont des cartes ou tuiles : clique-les par [ref] ou avec cliquer_texte. Préfère lire à capture (4 captures au maximum).",
     "",
     "## Règles d'action en recette (obligatoires)",
@@ -60,6 +62,7 @@ export function buildPrompt(p: PromptInput): string {
       ? `## Plan de test détaillé (référence : chemin exact, données, cas complémentaires — utilise-le pour trouver où aller, et pour compléter si le budget le permet)\n${p.detailedSteps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`
       : "## Plan de test détaillé\n(aucun pour ce ticket)",
     "",
+    ...(p.startRole ? [`Connecté en : ${p.startRole}`] : []),
     `Comptes disponibles (outil se_connecter) : ${p.roles.length ? p.roles.join(", ") : "(aucun)"}`,
     `Fichiers d'exemple (outil deposer) : ${p.fixtures.length ? p.fixtures.join(", ") : "(aucun)"}`,
   );
