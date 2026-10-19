@@ -88,8 +88,10 @@ window.__sfRead = () => {
 
 export type SessionOptions = {
   previewUrl: string;
-  /** rôle → chemin de connexion (avec identifiants). `admin` = compte de départ. */
+  /** rôle → chemin de connexion (avec identifiants). */
   accounts: Record<string, string>;
+  /** Chemin de connexion du compte de départ (null : racine de la preview). */
+  startPath: string | null;
   /** nom → chemin local des fichiers d'exemple. */
   fixtures: Record<string, string>;
   capturesDir: string;
@@ -112,7 +114,7 @@ export class BrowserSession {
     this.captures = opts.existingCaptures;
   }
 
-  /** Ouvre Chromium et se connecte en `admin` (auto-login) au premier appel. */
+  /** Ouvre Chromium et se connecte avec le compte de départ (auto-login) au premier appel. */
   private async ensurePage(): Promise<Page> {
     if (this.page) return this.page;
     this.browser = await chromium.launch({ headless: true });
@@ -131,7 +133,7 @@ export class BrowserSession {
       return blocked ? route.abort("blockedbyclient") : route.continue();
     });
     this.page = await context.newPage();
-    const start = this.opts.accounts.admin ?? "/";
+    const start = this.opts.startPath ?? "/";
     await this.page.goto(this.origin + start, { waitUntil: "domcontentloaded", timeout: 45_000 });
     await this.settle();
     return this.page;

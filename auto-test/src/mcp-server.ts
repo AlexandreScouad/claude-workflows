@@ -14,6 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { BrowserSession, type ToolResult } from "./browser.ts";
+import { resolveAccounts } from "./context.ts";
 import { fetchContext, type FeedbackAppConfig } from "./feedback-app.ts";
 import { appendAction, ensureRunDir, finalCapturePath, listCaptures, readTerminal, runPaths } from "./run-dir.ts";
 import { createSanitizer, secretValuesOf } from "./sanitize.ts";
@@ -61,12 +62,13 @@ async function getSession(): Promise<BrowserSession> {
   sessionPromise ??= (async () => {
     const res = await fetchContext(config, PROJECT_ID, TICKET_KEY);
     if (!res.ok) throw new Error(`Contexte du test indisponible (HTTP ${res.status}${res.code ? `, ${res.code}` : ""}).`);
-    const accounts: Record<string, string> = {};
-    for (const a of res.context.accounts) if (a.loginPath && !accounts[a.role]) accounts[a.role] = a.loginPath;
+    const { byRole, startPath } = resolveAccounts(res.context);
+    // Masquage : TOUS les chemins reçus, alias compris.
     sanitize = createSanitizer(secretValuesOf(res.context.accounts.map((a) => a.loginPath)));
     const s = new BrowserSession({
       previewUrl: res.context.previewUrl,
-      accounts,
+      accounts: byRole,
+      startPath,
       fixtures: await downloadFixtures(res.context.fixtures),
       capturesDir: paths.captures,
       finalCapture: finalCapturePath(RUN_DIR),
