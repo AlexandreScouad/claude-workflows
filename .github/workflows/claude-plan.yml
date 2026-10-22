@@ -475,6 +475,19 @@ jobs:
             - **Nouvelle feature** → Trouve UNE feature similaire existante comme modèle (pas plusieurs), applique ses patterns.
             - **Refactoring** → `Grep -l` d'abord (juste les noms de fichiers) pour mesurer l'ampleur, lis ensuite les fichiers les plus représentatifs seulement (pas tous).
 
+            **Section « 🗄️ Données concernées » de l'issue** (si présente) :
+            elle donne l'environnement du signalement (« Vu en : PROD /
+            RECETTE / LOCAL ») et les références métier citées par le client
+            (numéros de commande, de ligne…). Sers-t'en :
+            - cite ces références dans le diagnostic, et cherche dans le code
+              le chemin qui produit ou lit ces données ;
+            - si c'est « Vu en : PROD », ces données n'existent très
+              probablement **pas** en recette : écris-le explicitement dans
+              « Risques » du PLAN (le bug ne sera pas reproductible tel quel
+              en recette) et, dans TEST-PLAN.md, décris la **forme** de donnée
+              à recréer pour le tester (statut, champs vides, relations) —
+              jamais de valeur réelle copiée de la prod.
+
             Pour chaque zone modifiée, identifie les **dépendances en cascade**
             (RPC dépendantes, RLS policies impactées, composants/écrans qui
             partagent le code, tests existants) — par `Grep` ciblé, pas en
