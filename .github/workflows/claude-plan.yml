@@ -798,6 +798,16 @@ jobs:
             fi
           done
 
+          # Cas 2 et 3 (donnée abîmée) : jamais d'auto-approbation — l'admin
+          # valide le diagnostic avant toute réparation (#596, #598).
+          if [ -f prod-data.json ] && [ -f plan-confidence.json ]; then
+            CASE=$(jq -r '.data_case // empty' prod-data.json 2>/dev/null || true)
+            if [ "$CASE" = "data" ] || [ "$CASE" = "code_and_data" ]; then
+              jq '.auto_approve = false' plan-confidence.json > plan-confidence.tmp && mv plan-confidence.tmp plan-confidence.json
+              echo "::notice::auto-approbation désactivée : bug de données ($CASE), diagnostic à valider par l'admin"
+            fi
+          fi
+
       # ── Tracking consommation tokens → DB feedback-app ──
       # Parse le execution_file de CE step et POST les tokens à feedback-app, qui
       # calcule le coût (table de prix unique) et persiste. Aucun fichier commité.
