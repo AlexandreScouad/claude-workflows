@@ -350,10 +350,40 @@ jobs:
             statuts et des identifiants (jamais d'email, de nom, de téléphone,
             d'adresse ni de texte libre lu en base) : le plan est publié sur
             l'issue.
-          - Résume ce que tu as constaté en prod dans le diagnostic du PLAN, et
-            si une correction de données est nécessaire, donne la requête de
-            vérification (sur les vues `agent.*`) avec le résultat attendu
-            avant et après.
+          - **Classe le bug** d'après ce que tu constates en prod :
+            - `code` (cas 1) : bug de code révélé par une donnée saine ;
+            - `data` (cas 2) : donnée abîmée, code sain ou déjà corrigé ;
+            - `code_and_data` (cas 3) : un bug de code a abîmé des données.
+          - Ajoute dans PLAN.md, juste après l'Executive Summary, une section
+            `## 🗄️ Données prod (lecture seule)` : cas, diagnostic, nombre de
+            références touchées (quelques identifiants au plus), forme de la
+            donnée à reproduire en recette (cas 1 et 3, sans valeur réelle),
+            requête de vérification et résultat attendu avant/après, simulation
+            de la réparation (cas 2 et 3, agrégée). Cette section ne va **pas**
+            dans TEST-PLAN.md.
+          - **Requête de vérification** (obligatoire en cas 2 et 3) : UNE
+            requête SELECT sur les vues `agent.*` uniquement, qui renvoie une
+            valeur comparable (un `count(*)` en général) ; elle sera rejouée
+            automatiquement en prod après livraison. Joue-la toi-même et note
+            la valeur obtenue (`actual_before`).
+          - Écris aussi un 4ᵉ fichier, `prod-data.json` :
+            ```json
+            {
+              "data_case": "code | data | code_and_data",
+              "diagnostic": "1 à 3 phrases, nombres et statuts seulement",
+              "references": { "count": 37, "sample": ["4512", "4518"] },
+              "queries_run": 4,
+              "data_shape": "forme de la donnée à reproduire (cas 1 et 3), ou null",
+              "verification": {
+                "sql": "select count(*) from agent.orders where …",
+                "expected_before": 37,
+                "expected_after": 0,
+                "actual_before": 37
+              },
+              "repair_simulation": "résultat agrégé (cas 2 et 3), ou null"
+            }
+            ```
+            `verification` peut valoir `null` en cas 1 seulement.
           EOF
             echo "__SCOUAD_EOF__"
           } >> "$GITHUB_OUTPUT"
@@ -367,7 +397,7 @@ jobs:
           # Évite la collision avec un PLAN.md/TEST-PLAN.md committé dans le repo
           # cible (feedback-app a un PLAN.md = doc de migration). Le job de plan ne
           # commit jamais → suppression sans impact sur le repo.
-          rm -f PLAN.md TEST-PLAN.md plan-confidence.json
+          rm -f PLAN.md TEST-PLAN.md plan-confidence.json prod-data.json
           DOC_FILES=$(ls CLAUDE*.md 2>/dev/null | tr '\n' ',' | sed 's/,$//')
           echo "files=$DOC_FILES" >> $GITHUB_OUTPUT
 
@@ -746,7 +776,7 @@ jobs:
           TOKEN=$(jq -r '.mcpServers.prod_read.env.PROD_READ_TOKEN // empty' "$CONFIG" 2>/dev/null || true)
           if [ -n "$TOKEN" ]; then
             echo "::add-mask::$TOKEN"
-            for f in PLAN.md TEST-PLAN.md plan-confidence.json; do
+            for f in PLAN.md TEST-PLAN.md plan-confidence.json prod-data.json; do
               if [ -f "$f" ]; then sed -i "s|$TOKEN|[jeton retiré]|g" "$f"; fi
             done
             curl -sS --max-time 20 -o /dev/null -X DELETE "$CALLBACK_URL/api/agent-callback/prod-read/session" \
@@ -754,6 +784,19 @@ jobs:
               || echo "::warning::révocation de la session de lecture prod impossible (elle expire seule)"
           fi
           rm -f "$CONFIG"
+          # Données personnelles repérables recopiées par l'agent (#596) :
+          # retirées AVANT publication sur l'issue. Seconde barrière — la
+          # première, ce sont les vues masquées en base ; feedback-app
+          # revalide prod-data.json à la réception.
+          for f in PLAN.md TEST-PLAN.md prod-data.json; do
+            if [ -f "$f" ]; then
+              perl -Mutf8 -CSD -pi \
+                -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[retiré]/g;' \
+                -e 's/(?:\+33 ?|\b0)[1-9](?:[ .-]?\d{2}){4}\b/[retiré]/g;' \
+                -e 's/\b\d{15}\b/[retiré]/g;' \
+                "$f"
+            fi
+          done
 
       # ── Tracking consommation tokens → DB feedback-app ──
       # Parse le execution_file de CE step et POST les tokens à feedback-app, qui
@@ -822,6 +865,12 @@ jobs:
           if [ -f plan-confidence.json ] && jq empty plan-confidence.json 2>/dev/null; then
             CONF_JSON=$(jq -c . plan-confidence.json)
           fi
+          # Section « Données prod » (#596), présente seulement si la lecture
+          # prod était ouverte. feedback-app la valide et l'expurge.
+          PROD_JSON="null"
+          if [ -f prod-data.json ] && jq empty prod-data.json 2>/dev/null; then
+            PROD_JSON=$(jq -c . prod-data.json)
+          fi
 
           # 1) DB feedback-app (source de vérité)
           if [ -n "$CALLBACK_URL" ] && [ -n "$CALLBACK_SECRET" ]; then
@@ -832,13 +881,21 @@ jobs:
               --argjson issue "$ISSUE_NUMBER" \
               --arg plan "$PLAN_MD" --arg test "$TEST_MD" \
               --argjson conf "$CONF_JSON" \
-              '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,plan:$plan,testPlan:$test,confidence:$conf}')
-            curl -sS -X POST "$CALLBACK_URL/api/agent-callback/plan" \
+              --argjson prod "$PROD_JSON" \
+              '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,plan:$plan,testPlan:$test,confidence:$conf} + (if $prod == null then {} else {prodData:$prod} end)')
+            # Réponse non affichée : dépôt public, et elle peut citer le
+            # contenu refusé de prod-data.json.
+            if RESP=$(curl -sS -X POST "$CALLBACK_URL/api/agent-callback/plan" \
               -H "Authorization: Bearer $CALLBACK_SECRET" \
               -H "Content-Type: application/json" \
-              -d "$PAYLOAD" \
-              && echo "::notice::plan stocké en DB feedback-app" \
-              || echo "::warning::POST plan DB échoué (non-bloquant)"
+              -d "$PAYLOAD"); then
+              echo "::notice::plan stocké en DB feedback-app"
+              if [ -n "$(echo "$RESP" | jq -r '.data.prodDataError // empty' 2>/dev/null)" ]; then
+                echo "::warning::prod-data.json refusé par feedback-app (détail dans les logs Vercel)"
+              fi
+            else
+              echo "::warning::POST plan DB échoué (non-bloquant)"
+            fi
           else
             echo "::notice::FEEDBACK_APP_URL/AGENT_CALLBACK_SECRET absents — skip DB"
           fi
