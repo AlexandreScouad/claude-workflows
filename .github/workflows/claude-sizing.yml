@@ -19,7 +19,8 @@ name: Claude Sizing
 #
 # Stabilité : la température ne se règle pas sous Claude Code. Le modèle est
 # donc épinglé (input `model`, envoyé explicitement par feedback-app) ainsi
-# que la version du CLI, et la sortie est contrainte par `--json-schema`.
+# que la version du CLI, la sortie est contrainte par `--json-schema`, et la
+# taille retenue est la médiane adaptative de 2–3 tirages (step « Sizing »).
 # Banc de stabilité : voir la PR feedback-app de bascule.
 
 on:
@@ -105,7 +106,12 @@ jobs:
             "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" >/dev/null
           "$RUNNER_TEMP/claude-cli/node_modules/.bin/claude" --version
 
-      # ── Sizing : une seule réponse, contrainte par le schéma ──
+      # ── Sizing : médiane adaptative, chaque tirage contraint par le schéma ──
+      # Sous Claude Code la température reste à 1 : un tirage seul a donné
+      # 8/10 tailles stables au banc. Deux tirages en parallèle ; s'ils
+      # divergent, un troisième et on garde la médiane (même résultat qu'une
+      # médiane de 3, ~2,2 tirages en moyenne). La sortie retenue est celle
+      # d'un tirage dont la taille est la médiane : axes et taille concordent.
       - name: Sizing avec Claude
         id: sizing
         if: steps.req.outputs.skip != 'true'
@@ -116,22 +122,42 @@ jobs:
         run: |
           # Abonnement uniquement : une clé API passerait avant le jeton OAuth.
           unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
-          export CLAUDE_CONFIG_DIR="$PWD/.claude-config" DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-          mkdir -p "$CLAUDE_CONFIG_DIR"
-          set +e
-          "$RUNNER_TEMP/claude-cli/node_modules/.bin/claude" -p \
-            --system-prompt-file sys.txt \
-            --json-schema "$(cat schema.json)" \
-            --model "$MODEL" \
-            --tools "" --strict-mcp-config --setting-sources "" \
-            --output-format stream-json --verbose \
-            < user.txt > out.ndjson 2> err.txt
-          CODE=$?
-          set -e
-          echo "::notice::claude -p terminé (code $CODE)"
+          export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+          sample() {
+            mkdir -p "$PWD/.claude-config-$1"
+            CLAUDE_CONFIG_DIR="$PWD/.claude-config-$1" "$RUNNER_TEMP/claude-cli/node_modules/.bin/claude" -p \
+              --system-prompt-file sys.txt \
+              --json-schema "$(cat schema.json)" \
+              --model "$MODEL" \
+              --tools "" --strict-mcp-config --setting-sources "" \
+              --output-format stream-json --verbose \
+              < user.txt > "out-$1.ndjson" 2> "err-$1.txt" || true
+          }
+          size_of() {
+            jq -r 'select(.type == "result") | if (.is_error // false) then empty else (.structured_output.size // empty) end' "out-$1.ndjson" 2>/dev/null | tail -n 1
+          }
+          rank() { case "$1" in XXS) echo 0;; XS) echo 1;; S) echo 2;; M) echo 3;; L) echo 4;; XL) echo 5;; XXL) echo 6;; *) echo "";; esac; }
+
+          sample 1 & sample 2 & wait
+          S1=$(size_of 1); S2=$(size_of 2)
+          SAMPLES=2
+          if [ -z "$S1" ] || [ "$S1" != "$S2" ]; then
+            sample 3; SAMPLES=3
+          fi
+          # Médiane des tirages valides (rang, puis numéro) ; au moins 2 requis.
+          VALID=$(for i in $(seq 1 "$SAMPLES"); do S=$(size_of "$i"); R=$(rank "$S"); [ -n "$R" ] && echo "$R $i"; done | sort -n -k1,1 -k2,2)
+          COUNT=$(echo "$VALID" | grep -c . || true)
+          PICK=""
+          if [ "$COUNT" -ge 2 ]; then
+            PICK=$(echo "$VALID" | sed -n "$(( (COUNT - 1) / 2 + 1 ))p" | cut -d' ' -f2)
+          fi
+          echo "::notice::sizing : $SAMPLES tirage(s), $COUNT valide(s)"
+          if [ -n "$PICK" ]; then cp "out-$PICK.ndjson" out.ndjson; else : > out.ndjson; fi
+          # Tous les tirages comptent (tokens, durée, limite d'usage).
+          cat out-*.ndjson > all.ndjson
           # report-usage.cjs attend un tableau de turns (execution_file de
           # claude-code-action) : le flux NDJSON est regroupé tel quel.
-          jq -s '.' out.ndjson > execution.json 2>/dev/null || echo '[]' > execution.json
+          jq -s '.' all.ndjson > execution.json 2>/dev/null || echo '[]' > execution.json
           echo "execution_file=$PWD/execution.json" >> "$GITHUB_OUTPUT"
 
       # ── Tracking consommation tokens → DB feedback-app (comme plan/dev) ──
@@ -165,14 +191,17 @@ jobs:
         run: |
           [ -n "$CALLBACK_URL" ] && [ -n "$CALLBACK_SECRET" ] || exit 1
           [ -f out.ndjson ] || : > out.ndjson
+          [ -f all.ndjson ] || : > all.ndjson
           RESULT=$(jq -c 'select(.type == "result")' out.ndjson 2>/dev/null | tail -n 1)
+          [ -n "$RESULT" ] || RESULT=$(jq -c 'select(.type == "result")' all.ndjson 2>/dev/null | tail -n 1)
           [ -n "$RESULT" ] || RESULT='{}'
           OUTPUT=$(echo "$RESULT" | jq -c 'if (.is_error // false) then null else (.structured_output // null) end')
-          DURATION=$(echo "$RESULT" | jq '.duration_ms // null')
+          # Durée = somme des tirages : Comptes répartit l'abonnement au temps consommé.
+          DURATION=$(jq -s '[.[] | select(.type == "result") | (.duration_ms // 0)] | if length == 0 then null else add end' all.ndjson 2>/dev/null || echo null)
           # Limite d'usage de l'abonnement : dernier rate_limit_event refusé,
           # ou erreur de turn `rate_limit` (même détection que report-usage.cjs).
-          LIMIT=$(jq -c 'select(.type == "rate_limit_event" and .rate_limit_info.status == "rejected") | .rate_limit_info' out.ndjson 2>/dev/null | tail -n 1)
-          if [ -z "$LIMIT" ] && jq -e 'select(.message.error == "rate_limit" or .message.error == "billing_error")' out.ndjson >/dev/null 2>&1; then
+          LIMIT=$(jq -c 'select(.type == "rate_limit_event" and .rate_limit_info.status == "rejected") | .rate_limit_info' all.ndjson 2>/dev/null | tail -n 1)
+          if [ -z "$LIMIT" ] && jq -e 'select(.message.error == "rate_limit" or .message.error == "billing_error")' all.ndjson >/dev/null 2>&1; then
             LIMIT='{}'
           fi
           if [ -n "$LIMIT" ]; then
@@ -193,5 +222,5 @@ jobs:
           HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$CALLBACK_URL/api/agent-callback/sizing" \
             -H "Authorization: Bearer $CALLBACK_SECRET" -H "Content-Type: application/json" -d "$PAYLOAD")
           echo "::notice::verdict publié (HTTP $HTTP)"
-          rm -f out.ndjson execution.json sys.txt user.txt
+          rm -f out*.ndjson all.ndjson execution.json sys.txt user.txt
           [ "$HTTP" = "200" ] && [ "$OUTPUT" != "null" ]
