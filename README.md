@@ -8,7 +8,7 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 |----------|----------------|-------------|
 | `claude-plan.yml` | `claude-ready` | Genere un plan d'implementation + score de confiance |
 | `claude-dev.yml` | `plan-approved` | Implemente le plan, cree une PR |
-| `claude-estimate.yml` | `estimate-ready` | Estimation T-shirt sizing + sync Plane |
+| `claude-estimate.yml` | `estimate-ready` | Lecture du code avant chiffrage (morceaux, données, inconnues ; pas de taille) renvoyée à feedback-app + sync Plane |
 | `claude-pr-review.yml` | PR opened / `review-ready` | Review automatique de la PR |
 | `claude-cleanup.yml` | PR merged | Supprime la branche `claude/issue-*` |
 | `auto-test.yml` | `workflow_dispatch` (feedback-app) | Test automatique d'une PR sur sa preview (Claude Code headless + Playwright), verdict signé vers feedback-app |
@@ -34,7 +34,6 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 
 | Variable | Requis pour | Exemple |
 |----------|------------|---------|
-| `TELEGRAM_CHAT_ID` | claude-estimate | `7149509278` |
 | `PLANE_BASE_URL` | Plane integration | `https://api.plane.so` |
 | `PLANE_WORKSPACE` | Plane integration | `scouad` |
 | `PLANE_PROJECT_ID` | Plane integration | `uuid-du-projet` |
@@ -123,10 +122,10 @@ Les noms des champs sont configurables via les inputs `plane_plan_field_name` et
 |-------|------|---------|-------------|
 | `base_branch` | string | `recette` | Branche de checkout |
 | `project_name` | string | *requis* | Nom du projet |
-| `estimation_grid` | string | grille standard | Grille custom (markdown) |
+| `estimation_grid` | string | `''` | Ignoré (l'agent ne chiffre plus, feedback-app#635) |
 | `model` | string | `claude-sonnet-5-5` | Modele Claude |
-| `max_turns` | number | `30` | Turns max |
-| `extra_prompt` | string | `''` | Instructions specifiques |
+| `max_turns` | number | `40` | Turns max |
+| `extra_prompt` | string | `''` | Contexte complémentaire (réponses du client, documents) |
 
 ### claude-pr-review.yml
 
