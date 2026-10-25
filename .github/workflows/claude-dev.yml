@@ -326,6 +326,16 @@ jobs:
       # + lint-fix) finit pousse DROIT sur base_branch (constate sur feedback-app #18).
       # On cree donc explicitement claude/issue-N AVANT l'implementation. Si elle existe
       # deja (run precedent / correction liee a la branche), on la REUTILISE.
+      #
+      # Garde de base (bascule des projets vers des PR basees sur main) : une
+      # claude/issue-N existante a pu etre coupee depuis recette AVANT que le projet
+      # demande main. La reutiliser ferait partir vers main une PR qui embarque tout
+      # le code de recette non encore valide. Quand la base demandee n'est pas
+      # recette, on verifie que le point de depart de la branche (sa merge-base avec
+      # recette) est deja dans la base demandee ; sinon on ECHOUE explicitement
+      # plutot que de la recreer : elle porte peut-etre la PR vers recette d'un
+      # ticket demarre avant la bascule, qu'une recreation viderait. base_branch =
+      # recette : aucune verification, comportement inchange.
       - name: Create/reuse dedicated branch
         id: implbranch
         if: steps.check-existing.outputs.skip != 'true'
@@ -341,6 +351,24 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           if git ls-remote --exit-code --heads origin "$IMPL_BRANCH" >/dev/null 2>&1; then
+            if [ "$BASE_BRANCH" != "recette" ] && git ls-remote --exit-code --heads origin recette >/dev/null 2>&1; then
+              # API compare (pas d'historique local : checkout en fetch-depth 1).
+              # FORK = merge-base(recette, branche) ; la branche est compatible avec
+              # BASE_BRANCH si FORK en est un ancetre (compare FORK...BASE = ahead/identical).
+              if ! FORK=$(gh api "repos/$REPO/compare/recette...$IMPL_BRANCH" --jq '.merge_base_commit.sha'); then
+                echo "::error::Impossible de verifier le point de depart de $IMPL_BRANCH (API compare recette...$IMPL_BRANCH en echec) — reutilisation refusee vers $BASE_BRANCH."
+                exit 1
+              fi
+              if ! FORK_STATUS=$(gh api "repos/$REPO/compare/$FORK...$BASE_BRANCH" --jq '.status'); then
+                echo "::error::Impossible de comparer $FORK a $BASE_BRANCH — reutilisation de $IMPL_BRANCH refusee."
+                exit 1
+              fi
+              echo "Point de depart de $IMPL_BRANCH (merge-base avec recette) : $FORK — par rapport a $BASE_BRANCH : $FORK_STATUS"
+              if [ "$FORK_STATUS" != "ahead" ] && [ "$FORK_STATUS" != "identical" ]; then
+                echo "::error::La branche existante $IMPL_BRANCH a ete coupee depuis recette (point de depart $FORK, absent de $BASE_BRANCH) alors que la base demandee est $BASE_BRANCH. La reutiliser enverrait du code de recette non valide dans une PR vers $BASE_BRANCH. Rien n'a ete modifie : terminer ce ticket sur recette, ou supprimer/renommer $IMPL_BRANCH puis relancer le dev."
+                exit 1
+              fi
+            fi
             echo "Reutilisation de la branche existante $IMPL_BRANCH"
             git fetch --depth 1 origin "$IMPL_BRANCH"
             git checkout -B "$IMPL_BRANCH" FETCH_HEAD
