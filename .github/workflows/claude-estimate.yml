@@ -221,7 +221,6 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
-          allowed_tools: "Bash(cat *),Bash(echo *),Bash(printf *),Glob,Grep,Read,Write"
           prompt: |
             Estime la taille de cette issue avec une analyse structuree.
 
@@ -291,7 +290,12 @@ jobs:
             }
             ```
 
-          claude_args: '--model ${{ inputs.model }} --max-turns ${{ inputs.max_turns }}'
+          # `allowed_tools` n'est pas une entrée de claude-code-action v1 (ignorée en
+          # silence, relevé par actionlint) : la liste d'outils passe par claude_args.
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools "Bash(cat *),Bash(echo *),Bash(printf *),Glob,Grep,Read,Write"
 
       - name: Send to Telegram
         if: always() && steps.check.outputs.skip != 'true'
