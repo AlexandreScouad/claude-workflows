@@ -397,7 +397,7 @@ jobs:
           # Évite la collision avec un PLAN.md/TEST-PLAN.md committé dans le repo
           # cible (feedback-app a un PLAN.md = doc de migration). Le job de plan ne
           # commit jamais → suppression sans impact sur le repo.
-          rm -f PLAN.md TEST-PLAN.md plan-confidence.json prod-data.json
+          rm -f PLAN.md TEST-PLAN.md plan-confidence.json plan-size.json prod-data.json
           DOC_FILES=$(ls CLAUDE*.md 2>/dev/null | tr '\n' ',' | sed 's/,$//')
           echo "files=$DOC_FILES" >> $GITHUB_OUTPUT
 
@@ -532,7 +532,7 @@ jobs:
 
             ## Stockage du plan
 
-            Écris **toujours** trois fichiers à la racine du repo. C'est le workflow
+            Écris **toujours** quatre fichiers à la racine du repo. C'est le workflow
             (pas toi) qui les publie ensuite (DB feedback-app + commentaire GitHub +
             Plane). Ne poste rien toi-même, ne répète pas le plan dans ta réponse.
 
@@ -544,8 +544,9 @@ jobs:
             1. `PLAN.md` — markdown propre (template ci-dessous), sans balises HTML.
             2. `TEST-PLAN.md` — plan de test (template ci-dessous).
             3. `plan-confidence.json` — scoring (format ci-bas).
+            4. `plan-size.json` — taille t-shirt que CE plan laisse prévoir (section « Taille prévue par le plan » ci-bas).
 
-            Ta réponse finale doit être courte, ex. : `✅ PLAN.md, TEST-PLAN.md et plan-confidence.json écrits.`
+            Ta réponse finale doit être courte, ex. : `✅ PLAN.md, TEST-PLAN.md, plan-confidence.json et plan-size.json écrits.`
 
             ## Documents projet à lire
 
@@ -738,6 +739,49 @@ jobs:
             }
             ```
 
+            ## Taille prévue par le plan (`plan-size.json`)
+
+            Une fois le plan écrit, juge la taille t-shirt du travail QU'IL DÉCRIT
+            (pas de la demande telle qu'elle a été vendue). C'est une donnée de
+            calibration interne : elle n'est montrée ni au client ni sur l'issue, et
+            elle ne change RIEN au scoring ci-dessus — ne t'en sers pas pour
+            `confidence_score`, `coverage_score`, `risk_level` ni `auto_approve`.
+
+            Critère principal : le nombre de **règles métier NOUVELLES** que le plan
+            doit écrire (condition, calcul, statut, validation). Réutiliser un
+            mécanisme existant compte 0. Le nombre d'écrans, de composants, de rôles
+            ou de couches traversés ne fait PAS monter la taille à lui seul : un ajout
+            dans l'existant reste petit même s'il touche la BDD et plusieurs écrans.
+
+            | Taille | Définition | Signes dans le plan |
+            |---|---|---|
+            | XXS | un composant visuel, un seul fichier | libellé, couleur, ordre, élément déplacé, option retirée ; 0 règle |
+            | XS | modification simple sur plus d'un fichier, ou petit front + back | AJOUT d'un élément qui affiche une donnée existante ou branche une action existante (colonne, bouton, onglet, filtre) ; 0 règle |
+            | S | modification simple avec impact backend | UNE règle de comportement change, ou un dysfonctionnement à investiguer ; au plus un champ BDD |
+            | M | fonctionnalité simple, à tester par un humain | 2 à 3 règles nouvelles qui se combinent ; nouvelle étape ou popup dont le choix est enregistré ; donnée nouvelle créée et exploitée |
+            | L | fonctionnalité complexe, à cadrer avant de coder | flux nouveau complet (plusieurs étapes, ≥ 3 règles) ; intégration externe nouvelle ; refonte d'UN flux ou formulaire ; écran nourri par une donnée qui n'existe pas encore |
+            | XL | comme L, avec plusieurs allers-retours et maquettes | plusieurs flux alignés sur un nouveau pattern ; statut ou règle transverse à plusieurs types d'objets |
+            | XXL | quasiment un sprint | nouvelle entité ou module ; nouveau rôle avec ses droits ; données réelles de plusieurs sources ; brique de sécurité (auth) |
+
+            Frontières :
+            - XXS / XS : un seul fichier visuel, ou plus ? On compte les fichiers, pas la nature de l'élément.
+            - XS / S : l'app change-t-elle de COMPORTEMENT (pas seulement d'affichage) ?
+            - S / M : une règle ajustée dans un flux existant (même avec migration) = S ; une capacité nouvelle qu'un humain doit tester = M.
+            - M / L : 2-3 règles greffées sur un flux existant = M ; flux complet, intégration externe ou refonte de bout en bout = L.
+            - L / XL : cadrable en une passe = L ; plusieurs flux à aligner ou maquettes = XL.
+            - Réutilisation : si le plan reprend les briques d'un flux déjà construit sur le même pattern, une taille de moins.
+
+            Écris `plan-size.json` :
+            ```json
+            {
+              "size": "XXS|XS|S|M|L|XL|XXL",
+              "rules_count": N,
+              "reasons": ["1 à 3 phrases courtes, factuelles, tirées du plan"],
+              "signals": ["flux_complet|integration_externe|nouvelle_entite|nouveau_role|refonte_flux|migration|reutilisation"],
+              "grid_version": "2026-10-26"
+            }
+            ```
+
             ${{ inputs.extra_prompt }}
 
             ## Règles
@@ -776,7 +820,7 @@ jobs:
           TOKEN=$(jq -r '.mcpServers.prod_read.env.PROD_READ_TOKEN // empty' "$CONFIG" 2>/dev/null || true)
           if [ -n "$TOKEN" ]; then
             echo "::add-mask::$TOKEN"
-            for f in PLAN.md TEST-PLAN.md plan-confidence.json prod-data.json; do
+            for f in PLAN.md TEST-PLAN.md plan-confidence.json plan-size.json prod-data.json; do
               if [ -f "$f" ]; then sed -i "s|$TOKEN|[jeton retiré]|g" "$f"; fi
             done
             curl -sS --max-time 20 -o /dev/null -X DELETE "$CALLBACK_URL/api/agent-callback/prod-read/session" \
@@ -788,7 +832,7 @@ jobs:
           # retirées AVANT publication sur l'issue. Seconde barrière — la
           # première, ce sont les vues masquées en base ; feedback-app
           # revalide prod-data.json à la réception.
-          for f in PLAN.md TEST-PLAN.md prod-data.json; do
+          for f in PLAN.md TEST-PLAN.md plan-size.json prod-data.json; do
             if [ -f "$f" ]; then
               perl -Mutf8 -CSD -pi \
                 -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[retiré]/g;' \
@@ -877,6 +921,12 @@ jobs:
           fi
           # Section « Données prod » (#596), présente seulement si la lecture
           # prod était ouverte. feedback-app la valide et l'expurge.
+          # Taille prévue par le plan : calibration feedback-app uniquement
+          # (jamais publiée sur l'issue ni sur Plane).
+          SIZE_JSON="null"
+          if [ -f plan-size.json ] && jq empty plan-size.json 2>/dev/null; then
+            SIZE_JSON=$(jq -c . plan-size.json)
+          fi
           PROD_JSON="null"
           if [ -f prod-data.json ] && jq empty prod-data.json 2>/dev/null; then
             PROD_JSON=$(jq -c . prod-data.json)
@@ -892,7 +942,8 @@ jobs:
               --arg plan "$PLAN_MD" --arg test "$TEST_MD" \
               --argjson conf "$CONF_JSON" \
               --argjson prod "$PROD_JSON" \
-              '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,plan:$plan,testPlan:$test,confidence:$conf} + (if $prod == null then {} else {prodData:$prod} end)')
+              --argjson size "$SIZE_JSON" \
+              '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,plan:$plan,testPlan:$test,confidence:$conf} + (if $prod == null then {} else {prodData:$prod} end) + (if $size == null then {} else {planSize:$size} end)')
             # Réponse non affichée : dépôt public, et elle peut citer le
             # contenu refusé de prod-data.json.
             if RESP=$(curl -sS -X POST "$CALLBACK_URL/api/agent-callback/plan" \
