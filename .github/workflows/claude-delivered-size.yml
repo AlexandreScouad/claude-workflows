@@ -225,10 +225,27 @@ jobs:
               un flux nouveau complet ;
             - **données réelles de plusieurs sources** (import ou lecture de
               fichiers externes, formats différents à rapprocher) : au moins XL ;
-            - **nouvelle entité, module ou rôle** : XXL.
+            - **nouvelle entité, module ou rôle** : XXL ;
+            - **brique de sécurité d'authentification** (second facteur, code
+              par email ou SMS, nouveau mode de connexion) : XXL, même si elle
+              tient en quelques routes ;
+            - **statut ou règle transverse à plusieurs types d'objets** (un
+              statut commun avec des règles propres à chaque type) : XL, même si
+              chaque règle prise seule est simple ;
+            - **action groupée via une pop-up sur une liste** (sélection
+              multiple puis traitement en lot, avec sa propre saisie) : L.
             La règle « les surfaces ne font pas la taille » sert à ne pas gonfler
             un AJOUT dans l'existant (une colonne sur trois écrans reste XS) :
             elle ne s'applique pas à ces signaux.
+
+            ## Repères qui retiennent la taille
+
+            - **notification automatique sur seuil** (un email ou un message
+              envoyé quand une valeur atteint un palier) : M, même avec sa table
+              de suivi, son anti-doublon et son déclenchement planifié ;
+            - **correction purement front ou d'affichage** (hauteur, défilement,
+              disposition, libellé, sans changement de comportement côté
+              serveur) : XS, même si elle se présente comme un bug.
 
             À l'inverse, un gros volume mécanique (renommage, déplacement de
             code, copie d'un composant existant, données de test) ne fait pas
@@ -259,7 +276,7 @@ jobs:
               "rules_count": N,
               "reasons": ["1 à 3 phrases courtes, factuelles, tirées du diff"],
               "signals": ["flux_complet|refonte_flux|wizard|integration_externe|donnees_multi_sources|nouvelle_entite|nouveau_role|migration|reutilisation|volume_mecanique"],
-              "grid_version": "2026-10-26-livre"
+              "grid_version": "2026-10-26-livre-v2"
             }
             ```
           claude_args: |
