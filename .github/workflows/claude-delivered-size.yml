@@ -100,6 +100,13 @@ jobs:
           fetch-depth: 1
           # L'agent lit le dépôt et ne pousse rien : pas de jeton dans .git/config.
           persist-credentials: false
+          clean: true
+
+      # La config Claude du dépôt cible (.claude/, .mcp.json, CLAUDE.local.md)
+      # ne doit ni se charger ni s'exécuter dans ce run : hooks, permissions et
+      # serveurs MCP viendraient d'un dépôt que ce workflow ne contrôle pas.
+      - name: Retirer la config Claude du dépôt cible
+        run: rm -rf .claude .mcp.json CLAUDE.local.md delivered-size.json .scouad-delivered
 
       # Entrées du juge, dans un dossier dédié à la racine du checkout :
       # demande, plan, PR mergées et leur diff FILTRÉ. Même classement que
@@ -119,8 +126,6 @@ jobs:
           CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
         run: |
           set -euo pipefail
-          rm -f delivered-size.json
-          rm -rf .scouad-delivered
           mkdir .scouad-delivered
           D=.scouad-delivered
           MAX_DIFF=150000
@@ -168,6 +173,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Lecture du dépôt, écriture du SEUL fichier de sortie : pas de Bash,
+          # ni réseau, ni sous-agent (le diff et la demande viennent de tiers).
+          settings: |
+            {"permissions":{"allow":["Glob","Grep","Read(./**)","Write(./delivered-size.json)"],"deny":["Bash","WebFetch","WebSearch","NotebookEdit","Task","Edit","Read(./.git/**)","Read(//etc/**)"]}}
           prompt: |
             Tu juges, a posteriori, la taille t-shirt du travail RÉELLEMENT livré
             pour un ticket client du projet ${{ inputs.project_name }}. Ce n'est
@@ -257,7 +266,8 @@ jobs:
             --model ${{ inputs.model }}
             --effort ${{ inputs.effort }}
             --max-turns ${{ inputs.max_turns }}
-            --allowedTools "Glob,Grep,Read,Write"
+            --allowedTools "Glob,Grep,Read(./**),Write(./delivered-size.json)"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task,Edit"
             --strict-mcp-config
             --mcp-config ${{ steps.empty_mcp.outputs.path }}
 
@@ -277,7 +287,12 @@ jobs:
         run: |
           OWNER="${REPO_FULL_NAME%%/*}"
           NAME="${REPO_FULL_NAME##*/}"
-          if [ "$CLAUDE_OUTCOME" = "success" ] && [ -f delivered-size.json ] && jq -e 'type == "object"' delivered-size.json >/dev/null 2>&1; then
+          # Forme vérifiée avant envoi (feedback-app revalide et borne aussi).
+          VALID='type == "object"
+            and (.size | IN("XXS","XS","S","M","L","XL","XXL"))
+            and ((.reasons // []) | type == "array" and length <= 3 and all(type == "string" and length <= 300))
+            and ((.signals // []) | type == "array" and length <= 6 and all(type == "string" and length <= 60))'
+          if [ "$CLAUDE_OUTCOME" = "success" ] && [ -f delivered-size.json ] && jq -e "$VALID" delivered-size.json >/dev/null 2>&1; then
             PAYLOAD=$(jq -nc \
               --arg owner "$OWNER" --arg name "$NAME" \
               --argjson issue "$ISSUE_NUMBER" --arg req "$REQUEST_ID" \
@@ -285,7 +300,7 @@ jobs:
               '{repo:{owner:$owner,name:$name},ghIssueNumber:$issue,requestId:$req,status:"done",deliveredSize:$size[0]}')
           else
             if [ "$CLAUDE_OUTCOME" = "success" ]; then
-              ERROR="delivered-size.json absent ou illisible"
+              ERROR="delivered-size.json absent, illisible ou hors format"
             elif [ "$CLAUDE_OUTCOME" = "skipped" ]; then
               ERROR="entrées du juge non préparées (token, diff ou checkout en échec)"
             else
