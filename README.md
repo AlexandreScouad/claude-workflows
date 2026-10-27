@@ -11,6 +11,7 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 | `claude-estimate.yml` | `estimate-ready` | Lecture du code avant chiffrage (morceaux, données, inconnues ; pas de taille) renvoyée à feedback-app + sync Plane |
 | `claude-pr-review.yml` | PR opened / `review-ready` | Review automatique de la PR |
 | `claude-cleanup.yml` | PR merged | Supprime la branche `claude/issue-*` |
+| `claude-sizing.yml` | `workflow_dispatch` (feedback-app) | Sizing t-shirt d'un ticket « À estimer » (skill scouad-tshirt-estimation) sur l'abonnement : `claude -p` sans outils, Sonnet 4.6 épinglé, sortie au schéma JSON, verdict vers `/api/agent-callback/sizing`. Remplace l'appel API sk-ant de feedback-app |
 | `auto-test.yml` | `workflow_dispatch` (feedback-app) | Test automatique d'une PR sur sa preview (Claude Code headless + Playwright), verdict signé vers feedback-app |
 
 ## Utilisation
