@@ -756,8 +756,8 @@ jobs:
             | Taille | Définition | Signes dans le plan |
             |---|---|---|
             | XXS | un composant visuel, un seul fichier | libellé, couleur, ordre, élément déplacé, option retirée ; 0 règle |
-            | XS | modification simple sur plus d'un fichier, ou petit front + back | AJOUT d'un élément qui affiche une donnée existante ou branche une action existante (colonne, bouton, onglet, filtre) ; 0 règle |
-            | S | modification simple avec impact backend | UNE règle de comportement change, ou un dysfonctionnement à investiguer ; au plus un champ BDD |
+            | XS | modification simple sur plus d'un fichier, ou petit front + back | AJOUT d'un élément qui affiche une donnée existante ou branche une action existante (colonne, bouton, onglet, filtre) ; ou CORRECTION d'un dysfonctionnement limité à une seule règle ; 0 règle nouvelle |
+            | S | modification simple avec impact backend | UNE règle de comportement VOULUE change (ce que l'app doit faire désormais) ; au plus un champ BDD |
             | M | fonctionnalité simple, à tester par un humain | 2 à 3 règles nouvelles qui se combinent ; nouvelle étape ou popup dont le choix est enregistré ; donnée nouvelle créée et exploitée |
             | L | fonctionnalité complexe, à cadrer avant de coder | flux nouveau complet (plusieurs étapes, ≥ 3 règles) ; intégration externe nouvelle ; refonte d'UN flux ou formulaire ; écran nourri par une donnée qui n'existe pas encore |
             | XL | comme L, avec plusieurs allers-retours et maquettes | plusieurs flux alignés sur un nouveau pattern ; statut ou règle transverse à plusieurs types d'objets |
@@ -765,7 +765,7 @@ jobs:
 
             Frontières :
             - XXS / XS : un seul fichier visuel, ou plus ? On compte les fichiers, pas la nature de l'élément.
-            - XS / S : l'app change-t-elle de COMPORTEMENT (pas seulement d'affichage) ?
+            - XS / S : l'app change-t-elle de COMPORTEMENT voulu (pas seulement d'affichage) ? Corriger un dysfonctionnement qui ne touche qu'une règle = XS, même s'il a fallu chercher la cause.
             - S / M : une règle ajustée dans un flux existant (même avec migration) = S ; une capacité nouvelle qu'un humain doit tester = M.
             - M / L : 2-3 règles greffées sur un flux existant = M ; flux complet, intégration externe ou refonte de bout en bout = L.
             - L / XL : cadrable en une passe = L ; plusieurs flux à aligner ou maquettes = XL.
