@@ -12,6 +12,7 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 | `claude-pr-review.yml` | PR opened / `review-ready` | Review automatique de la PR |
 | `claude-cleanup.yml` | PR merged | Supprime la branche `claude/issue-*` |
 | `auto-test.yml` | `workflow_dispatch` (feedback-app) | Test automatique d'une PR sur sa preview (Claude Code headless + Playwright), verdict signé vers feedback-app |
+| `veille-brief.yml` | `workflow_dispatch` (feedback-app, module Veille, 3 h Paris) | Brief quotidien de veille IA : Claude Code en fichiers seuls sur le dossier servi par feedback-app (input `run_id` seul), dépôt de `sortie.json` ; contrat `docs/agents/veille-contrat.md` de feedback-app |
 
 ## Utilisation
 

@@ -1,0 +1,185 @@
+name: Veille — brief quotidien
+
+# Le run quotidien de veille IA de Scouad (feedback-app#698, carte #695, REQ-VEI-123).
+# Adaptateur mince, calqué sur contenu-etape.yml : le module Veille de Feedback App
+# ouvre le run à 3 h Paris et dispatche ce workflow avec le seul `run_id` ; ici on
+# récupère le dossier, on lance Claude Code en fichiers seuls, et on dépose
+# `sortie.json`. Pas de scouad-os, pas de checkout : tout vient du dossier.
+# Contrat : feedback-app `docs/agents/veille-contrat.md`.
+#
+# SECURITY REVIEW:
+# - `run_id` est validé par regex dans le premier step avant tout usage ; jamais
+#   interpolé tel quel dans un `run:` (passé par `env:`).
+# - Aucun secret ni réseau dans la portée de Claude : pas de MCP
+#   (--strict-mcp-config + config vide), aucun Bash ; Read limité au répertoire de
+#   travail (la règle Read s'applique aussi à Glob et Grep), écriture limitée à
+#   sortie.json (les règles Edit(...) couvrent l'outil Write). Même réglage que
+#   contenu-etape.yml, vérifié en local par des sondes.
+# - Pas de checkout : le répertoire de travail d'un runner auto-hébergé non éphémère
+#   garde les fichiers (et un éventuel .git avec un jeton) des jobs précédents.
+#   Le premier step le VIDE entièrement, sinon Read(./**) les lirait. Sans dépôt
+#   git, la configuration git de claude-code-action échoue sans conséquence (elle
+#   attrape l'erreur) et n'écrit donc aucun jeton dans le répertoire.
+# - Le contenu des items (articles, flux, pages collectés sur le web) est une
+#   donnée non fiable : la consigne le dit, et Claude n'a de toute façon ni
+#   réseau ni écriture hors sortie.json. Le dépôt est revalidé côté module.
+# - Pas d'OIDC (id-token) : claude-code-action reçoit le GITHUB_TOKEN du run, en
+#   lecture seule.
+# - Risque résiduel : runner auto-hébergé partagé, non éphémère (comme toute la
+#   suite claude-workflows).
+# - AGENT_CALLBACK_SECRET ne sert qu'aux steps « dossier » et « dépôt ».
+# - Les noms de fichiers du dossier (`textes`) sont refusés s'ils ne sont pas de la
+#   forme <uuid>.md (pas d'écriture hors de dossier/items/).
+# - claude-code-action exige que ce fichier soit identique sur `main` : il ne se
+#   teste pas sur une branche.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run ouvert par le module Veille (uuid agent_runs)"
+        type: string
+        required: true
+
+jobs:
+  brief:
+    runs-on: self-hosted
+    # Le module clôt en erreur un run sans dépôt après 45 min.
+    timeout-minutes: 40
+
+    # Un seul brief à la fois.
+    concurrency:
+      group: veille-brief
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+
+    env:
+      FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+      RUN_ID: ${{ inputs.run_id }}
+
+    steps:
+      # ── Entrées ──
+      - name: Valider les entrées
+        id: params
+        run: |
+          UUID='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          if ! [[ "$RUN_ID" =~ $UUID ]]; then echo "::error::run_id invalide"; exit 1; fi
+          if [ -z "$FEEDBACK_APP_URL" ]; then echo "::error::variable FEEDBACK_APP_URL manquante"; exit 1; fi
+          echo "debut=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      # ── Répertoire de travail vidé (pas de checkout) ──
+      - name: Vider le répertoire de travail
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          echo "Fichiers restants : $(find "$GITHUB_WORKSPACE" -mindepth 1 | wc -l)"
+
+      # ── Dossier ──
+      - name: Récupérer le dossier
+        env:
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+        run: |
+          if [ -z "$CALLBACK_SECRET" ]; then echo "::error::secret AGENT_CALLBACK_SECRET manquant"; exit 1; fi
+          HTTP=$(curl -sS -o "$RUNNER_TEMP/dossier.json" -w '%{http_code}' \
+            -H "Authorization: Bearer $CALLBACK_SECRET" \
+            "$FEEDBACK_APP_URL/api/agent-callback/veille/runs/$RUN_ID/dossier")
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::dossier : HTTP $HTTP"; head -c 500 "$RUNNER_TEMP/dossier.json"; exit 1
+          fi
+          # La route répond { success: true, data: dossier }.
+          jq -e '.success == true and (.data | type == "object")' "$RUNNER_TEMP/dossier.json" > /dev/null || { echo "::error::dossier illisible"; exit 1; }
+          jq '.data' "$RUNNER_TEMP/dossier.json" > "$RUNNER_TEMP/d.json"
+          mkdir -p dossier/items
+          jq '.unite' "$RUNNER_TEMP/d.json" > dossier/unite.json
+          jq '.items' "$RUNNER_TEMP/d.json" > dossier/items.json
+          jq '.historique' "$RUNNER_TEMP/d.json" > dossier/historique.json
+          jq '.sources' "$RUNNER_TEMP/d.json" > dossier/sources.json
+          jq -r '.consigne' "$RUNNER_TEMP/d.json" > dossier/consigne.md
+          for f in unite items historique sources; do
+            [ "$(jq -r type "dossier/$f.json")" != "null" ] || { echo "::error::dossier incomplet : $f"; exit 1; }
+          done
+          [ -s dossier/consigne.md ] || { echo "::error::consigne vide"; exit 1; }
+          # Un texte par item : <uuid>.md, jamais un autre nom.
+          jq -r '.textes // {} | keys[]' "$RUNNER_TEMP/d.json" | while IFS= read -r k; do
+            [[ "$k" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.md$ ]] || { echo "::error::nom de fichier refusé : $k"; exit 1; }
+            jq -r --arg k "$k" '.textes[$k]' "$RUNNER_TEMP/d.json" > "dossier/items/$k"
+          done
+          echo "Dossier :"; find dossier -type f | wc -l; jq -c '.unite.troncature' "$RUNNER_TEMP/d.json"
+
+      - name: Config MCP vide, temporaires effacés
+        id: empty_mcp
+        run: |
+          rm -f "$RUNNER_TEMP/dossier.json" "$RUNNER_TEMP/d.json"
+          echo '{"mcpServers":{}}' > "$RUNNER_TEMP/empty-mcp.json"
+          echo "path=$RUNNER_TEMP/empty-mcp.json" >> "$GITHUB_OUTPUT"
+
+      # ── Claude Code, fichiers seuls ──
+      - name: Brief du jour
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          settings: |
+            {"permissions":{"allow":["Glob","Grep","Read(./**)","Edit(./sortie.json)"],"deny":["Bash","WebFetch","WebSearch","NotebookEdit","Task","Read(//etc/**)"]}}
+          prompt: |
+            Tu es le run quotidien de veille IA de Scouad.
+            Lis dossier/consigne.md et applique-la à la lettre : le dossier du run est dans dossier/ (commence par dossier/unite.json).
+            Écris ta sortie, et seulement elle, dans le fichier sortie.json à la racine du répertoire de travail.
+          # `allowed_tools` n'est pas une entrée de claude-code-action v1 (ignorée en silence) :
+          # la restriction passe par --allowedTools / --disallowedTools.
+          claude_args: |
+            --model claude-sonnet-5-5
+            --max-turns 80
+            --strict-mcp-config
+            --mcp-config ${{ steps.empty_mcp.outputs.path }}
+            --allowedTools "Read(./**),Edit(./sortie.json),Glob,Grep"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task"
+
+      # ── Dépôt ──
+      - name: Déposer la sortie
+        if: always() && steps.params.outcome == 'success'
+        env:
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          DEBUT: ${{ steps.params.outputs.debut }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          DUREE=$(( $(date +%s) - DEBUT ))
+          # Mesures lues dans execution_file (tours de claude-code-action) ; null si absent.
+          # Abonnement : pas de coût en dollars (cost_usd reste null, REQ-VEI-154).
+          COUT=$(jq -nc --argjson d "$DUREE" '{tokens_in:null, tokens_out:null, cost_usd:null, duree_s:$d}')
+          if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
+            COUT=$(jq -c --argjson d "$DUREE" '
+              (map(select(.type == "assistant") | .message.usage // {}) ) as $u
+              | { tokens_in: ([$u[] | (.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)] | add // null),
+                  tokens_out: ([$u[] | .output_tokens // 0] | add // null),
+                  cost_usd: null,
+                  duree_s: $d }' "$EXEC_FILE" 2>/dev/null || echo "$COUT")
+          fi
+          # Le corps passe par fichier (--slurpfile, --data-binary @) : un brief dépasse la limite d'un argument de ligne de commande.
+          if [ -f sortie.json ] && jq -e 'type == "object"' sortie.json > /dev/null 2>&1; then
+            jq --arg r "$RUN_ID" '.run_id = $r' sortie.json > "$RUNNER_TEMP/sortie-ok.json"
+          else
+            # Pas de sortie lisible : on clôt proprement en échec plutôt que d'attendre 45 min.
+            MOTIF="pas de sortie.json lisible (étape Claude : ${CLAUDE_OUTCOME:-non lancée})"
+            jq -nc --arg r "$RUN_ID" --arg m "$MOTIF" '{run_id:$r, statut:"echec", motif:$m}' > "$RUNNER_TEMP/sortie-ok.json"
+          fi
+          jq -n --slurpfile s "$RUNNER_TEMP/sortie-ok.json" --argjson c "$COUT" '{sortie:$s[0], cout:$c}' > "$RUNNER_TEMP/body.json"
+          HTTP=$(curl -sS -o "$RUNNER_TEMP/depot.json" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $CALLBACK_SECRET" -H "Content-Type: application/json" \
+            --data-binary @"$RUNNER_TEMP/body.json" \
+            "$FEEDBACK_APP_URL/api/agent-callback/veille/runs/$RUN_ID/depot")
+          echo "Dépôt : HTTP $HTTP"; head -c 1000 "$RUNNER_TEMP/depot.json"; echo
+          case "$HTTP" in
+            200) ;;
+            409) echo "::notice::run déjà clos ou brief du jour déjà présent : pas de nouvel essai" ;;
+            *) echo "::error::dépôt refusé (HTTP $HTTP)"; exit 1 ;;
+          esac
+
+      - name: Nettoyer
+        if: always()
+        run: |
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          rm -f "$RUNNER_TEMP/dossier.json" "$RUNNER_TEMP/d.json" "$RUNNER_TEMP/depot.json" "$RUNNER_TEMP/body.json" "$RUNNER_TEMP/sortie-ok.json"
