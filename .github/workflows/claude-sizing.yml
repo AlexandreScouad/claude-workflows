@@ -1,0 +1,226 @@
+name: Claude Sizing
+
+# Sizing t-shirt d'un ticket (skill scouad-tshirt-estimation) sur l'abonnement
+# Claude Code, à la place de l'appel API sk-ant de feedback-app
+# (QualificationService.suggestSize, retiré). Dispatché par feedback-app
+# (`runAiEstimate`), un run par `sizing_runs.id`.
+#
+# SECURITY REVIEW :
+# - Dispatch-only. Seuls inputs : un uuid et un nom de modèle, validés en
+#   tête de job. Aucun texte utilisateur dans les inputs ni dans une
+#   expression `${{ }}` d'un `run:`.
+# - La requête (system prompt, ticket, schéma) est servie par feedback-app
+#   (`/api/agent-callback/sizing/request`, Bearer AGENT_CALLBACK_SECRET) et
+#   écrite dans $RUNNER_TEMP. Dépôt public : ni la requête ni la sortie de
+#   Claude ne sont affichées dans les logs ni uploadées.
+# - Claude tourne sans outils (`--tools ""`), sans MCP, sans réglages ni
+#   CLAUDE.md (`--setting-sources ""`, CLAUDE_CONFIG_DIR vierge), hors de tout
+#   checkout : il ne peut que répondre au schéma JSON.
+#
+# Stabilité : la température ne se règle pas sous Claude Code. Le modèle est
+# donc épinglé (input `model`, envoyé explicitement par feedback-app) ainsi
+# que la version du CLI, la sortie est contrainte par `--json-schema`, et la
+# taille retenue est la médiane adaptative de 2–3 tirages (step « Sizing »).
+# Banc de stabilité : voir la PR feedback-app de bascule.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sizing_run_id:
+        description: 'sizing_runs.id côté feedback-app'
+        type: string
+        required: true
+      model:
+        description: 'Modèle de sizing (épinglé — ne pas changer sans refaire le banc de stabilité)'
+        type: string
+        default: 'claude-sonnet-4-6'
+
+env:
+  CLAUDE_CODE_VERSION: '2.1.306'
+
+jobs:
+  sizing:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Valider les entrées
+        env:
+          SIZING_RUN_ID: ${{ inputs.sizing_run_id }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          if ! [[ "$SIZING_RUN_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            echo "::error::sizing_run_id invalide"; exit 1
+          fi
+          if ! [[ "$MODEL" =~ ^claude-[a-z0-9.-]+$ ]]; then
+            echo "::error::model invalide"; exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/sizing"
+
+      # ── Requête figée au dispatch, servie par feedback-app ──
+      - name: Récupérer la requête de sizing
+        id: req
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          SIZING_RUN_ID: ${{ inputs.sizing_run_id }}
+          GH_RUN_ID: ${{ github.run_id }}
+        working-directory: ${{ runner.temp }}/sizing
+        run: |
+          if [ -z "$CALLBACK_URL" ] || [ -z "$CALLBACK_SECRET" ]; then
+            echo "::error::FEEDBACK_APP_URL / AGENT_CALLBACK_SECRET requis"
+            exit 1
+          fi
+          HTTP=$(curl -sS -o req.json -w '%{http_code}' -X POST "$CALLBACK_URL/api/agent-callback/sizing/request" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg id "$SIZING_RUN_ID" --argjson gh "$GH_RUN_ID" '{runId:$id,ghRunId:$gh}')")
+          if [ "$HTTP" = "409" ]; then
+            # Run déjà clos côté app (remplacé par un plus récent) : rien à faire.
+            echo "::notice::run de sizing déjà clos — arrêt sans appel à Claude"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$HTTP" != "200" ] || ! jq -e '.success == true' req.json >/dev/null; then
+            echo "::error::requête de sizing indisponible (HTTP $HTTP)"
+            exit 1
+          fi
+          jq -r '.data.system' req.json > sys.txt
+          jq -r '.data.user' req.json > user.txt
+          jq -c '.data.schema' req.json > schema.json
+          echo "repo=$(jq -r '.data.repo // ""' req.json)" >> "$GITHUB_OUTPUT"
+          echo "issue=$(jq -r '.data.ghIssueNumber // 0' req.json)" >> "$GITHUB_OUTPUT"
+          rm req.json
+
+      - name: Installer Node
+        if: steps.req.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Installer Claude Code (version épinglée)
+        if: steps.req.outputs.skip != 'true'
+        run: |
+          npm install --prefix "$RUNNER_TEMP/claude-cli" --no-save --no-audit --no-fund \
+            "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" >/dev/null
+          "$RUNNER_TEMP/claude-cli/node_modules/.bin/claude" --version
+
+      # ── Sizing : médiane adaptative, chaque tirage contraint par le schéma ──
+      # Sous Claude Code la température reste à 1 : un tirage seul a donné
+      # 8/10 tailles stables au banc. Deux tirages en parallèle ; s'ils
+      # divergent, un troisième et on garde la médiane (même résultat qu'une
+      # médiane de 3, ~2,2 tirages en moyenne). La sortie retenue est celle
+      # d'un tirage dont la taille est la médiane : axes et taille concordent.
+      - name: Sizing avec Claude
+        id: sizing
+        if: steps.req.outputs.skip != 'true'
+        working-directory: ${{ runner.temp }}/sizing
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          # Abonnement uniquement : une clé API passerait avant le jeton OAuth.
+          unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+          export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+          sample() {
+            mkdir -p "$PWD/.claude-config-$1"
+            CLAUDE_CONFIG_DIR="$PWD/.claude-config-$1" "$RUNNER_TEMP/claude-cli/node_modules/.bin/claude" -p \
+              --system-prompt-file sys.txt \
+              --json-schema "$(cat schema.json)" \
+              --model "$MODEL" \
+              --tools "" --strict-mcp-config --setting-sources "" \
+              --output-format stream-json --verbose \
+              < user.txt > "out-$1.ndjson" 2> "err-$1.txt" || true
+          }
+          size_of() {
+            jq -r 'select(.type == "result") | if (.is_error // false) then empty else (.structured_output.size // empty) end' "out-$1.ndjson" 2>/dev/null | tail -n 1
+          }
+          rank() { case "$1" in XXS) echo 0;; XS) echo 1;; S) echo 2;; M) echo 3;; L) echo 4;; XL) echo 5;; XXL) echo 6;; *) echo "";; esac; }
+
+          sample 1 & sample 2 & wait
+          S1=$(size_of 1); S2=$(size_of 2)
+          SAMPLES=2
+          if [ -z "$S1" ] || [ "$S1" != "$S2" ]; then
+            sample 3; SAMPLES=3
+          fi
+          # Médiane des tirages valides (rang, puis numéro) ; au moins 2 requis.
+          VALID=$(for i in $(seq 1 "$SAMPLES"); do S=$(size_of "$i"); R=$(rank "$S"); [ -n "$R" ] && echo "$R $i"; done | sort -n -k1,1 -k2,2)
+          COUNT=$(echo "$VALID" | grep -c . || true)
+          PICK=""
+          if [ "$COUNT" -ge 2 ]; then
+            PICK=$(echo "$VALID" | sed -n "$(( (COUNT - 1) / 2 + 1 ))p" | cut -d' ' -f2)
+          fi
+          echo "::notice::sizing : $SAMPLES tirage(s), $COUNT valide(s)"
+          if [ -n "$PICK" ]; then cp "out-$PICK.ndjson" out.ndjson; else : > out.ndjson; fi
+          # Tous les tirages comptent (tokens, durée, limite d'usage).
+          cat out-*.ndjson > all.ndjson
+          # report-usage.cjs attend un tableau de turns (execution_file de
+          # claude-code-action) : le flux NDJSON est regroupé tel quel.
+          jq -s '.' all.ndjson > execution.json 2>/dev/null || echo '[]' > execution.json
+          echo "execution_file=$PWD/execution.json" >> "$GITHUB_OUTPUT"
+
+      # ── Tracking consommation tokens → DB feedback-app (comme plan/dev) ──
+      - name: Report Claude usage
+        if: always() && steps.sizing.outputs.execution_file != ''
+        env:
+          EXEC_FILE: ${{ steps.sizing.outputs.execution_file }}
+          ISSUE_NUM: ${{ steps.req.outputs.issue }}
+          WORKFLOW_NAME: Claude Sizing
+          STEP_NAME: sizing
+          RUN_ID: ${{ github.run_id }}
+          CLAUDE_MODEL: ${{ inputs.model }}
+          REPO: ${{ steps.req.outputs.repo }}
+          FEEDBACK_APP_URL: ${{ vars.FEEDBACK_APP_URL }}
+          AGENT_CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${{ github.sha }}/scripts/report-usage.cjs" -o "$RUNNER_TEMP/report-usage.cjs" \
+            && node "$RUNNER_TEMP/report-usage.cjs" \
+            || echo "::notice::report-usage skipped (download/parse failed)"
+
+      # ── Verdict → feedback-app. Toujours envoyé (if: always()) : un run qui
+      #    ne rappelle pas laisse le ticket « L'IA estime… » jusqu'au délai de
+      #    garde de 30 min ; un échec explicite relance plus vite. ──
+      - name: Publier le verdict
+        if: always() && steps.req.outputs.skip != 'true'
+        working-directory: ${{ runner.temp }}/sizing
+        env:
+          CALLBACK_URL: ${{ vars.FEEDBACK_APP_URL }}
+          CALLBACK_SECRET: ${{ secrets.AGENT_CALLBACK_SECRET }}
+          SIZING_RUN_ID: ${{ inputs.sizing_run_id }}
+        run: |
+          [ -n "$CALLBACK_URL" ] && [ -n "$CALLBACK_SECRET" ] || exit 1
+          [ -f out.ndjson ] || : > out.ndjson
+          [ -f all.ndjson ] || : > all.ndjson
+          RESULT=$(jq -c 'select(.type == "result")' out.ndjson 2>/dev/null | tail -n 1)
+          [ -n "$RESULT" ] || RESULT=$(jq -c 'select(.type == "result")' all.ndjson 2>/dev/null | tail -n 1)
+          [ -n "$RESULT" ] || RESULT='{}'
+          OUTPUT=$(echo "$RESULT" | jq -c 'if (.is_error // false) then null else (.structured_output // null) end')
+          # Durée = somme des tirages : Comptes répartit l'abonnement au temps consommé.
+          DURATION=$(jq -s '[.[] | select(.type == "result") | (.duration_ms // 0)] | if length == 0 then null else add end' all.ndjson 2>/dev/null || echo null)
+          # Limite d'usage de l'abonnement : dernier rate_limit_event refusé,
+          # ou erreur de turn `rate_limit` (même détection que report-usage.cjs).
+          LIMIT=$(jq -c 'select(.type == "rate_limit_event" and .rate_limit_info.status == "rejected") | .rate_limit_info' all.ndjson 2>/dev/null | tail -n 1)
+          if [ -z "$LIMIT" ] && jq -e 'select(.message.error == "rate_limit" or .message.error == "billing_error")' all.ndjson >/dev/null 2>&1; then
+            LIMIT='{}'
+          fi
+          if [ -n "$LIMIT" ]; then
+            USAGE=$(echo "$LIMIT" | jq -c '{status:"rejected", resetsAt:(if (.resetsAt|type) == "number" then ((if .resetsAt < 1e12 then .resetsAt else .resetsAt / 1000 end) | floor | todate) else null end)}')
+          else
+            USAGE=null
+          fi
+          if [ "$OUTPUT" != "null" ]; then
+            PAYLOAD=$(jq -nc --arg id "$SIZING_RUN_ID" --argjson out "$OUTPUT" --argjson d "$DURATION" \
+              '{runId:$id,status:"completed",output:$out,durationMs:$d}')
+          else
+            # Raison courte et sans contenu du ticket : sous-type du résultat.
+            REASON=$(echo "$RESULT" | jq -r '"claude -p sans sortie structurée (" + (.subtype // "aucun résultat") + ")"')
+            PAYLOAD=$(jq -nc --arg id "$SIZING_RUN_ID" --arg e "$REASON" --argjson d "$DURATION" --argjson u "$USAGE" \
+              '{runId:$id,status:"failed",error:$e,durationMs:$d,usageLimit:$u}')
+          fi
+          # Réponse non affichée : elle peut citer la sortie refusée.
+          HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$CALLBACK_URL/api/agent-callback/sizing" \
+            -H "Authorization: Bearer $CALLBACK_SECRET" -H "Content-Type: application/json" -d "$PAYLOAD")
+          echo "::notice::verdict publié (HTTP $HTTP)"
+          rm -f out*.ndjson all.ndjson execution.json sys.txt user.txt
+          [ "$HTTP" = "200" ] && [ "$OUTPUT" != "null" ]
