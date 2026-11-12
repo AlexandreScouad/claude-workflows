@@ -156,6 +156,20 @@ jobs:
       # CLIENT en tant qu'utilisateur (headless), pas le repo. `npx -y` fetch
       # le paquet à la volée — pas de step d'install séparée nécessaire
       # (contrairement à Playwright driver brut utilisé par visual-regression.yml).
+      #
+      # Bug constaté (feedback-app#265/#266, 2026-09-09) : le runner
+      # self-hosted n'expose qu'un `node` v10.19 système (apt Ubuntu 20.04,
+      # sans npm/npx) sur son PATH — `npx -y @playwright/mcp@latest` échouait
+      # silencieusement (MCP jamais connecté), l'agent retombait sur un
+      # verdict `not_reproduced` trompeur sans avoir navigué nulle part.
+      # Même fix que `visual-regression.yml`/`claude-dev.yml` : poser un Node
+      # récent sur le PATH avant le step, une bonne fois pour ce job.
+      - name: Set up Node (npx pour Playwright MCP)
+        if: inputs.page_url != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Verif-bug with Claude (Playwright MCP)
         if: inputs.page_url != ''
         uses: anthropics/claude-code-action@v1
