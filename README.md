@@ -28,7 +28,6 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 |--------|--------|-------|
 | `CLAUDE_CODE_OAUTH_TOKEN` | Oui | Authentification Claude Code Action |
 | `PLANE_API_TOKEN` | Non | Integration Plane (plan stocke dans custom fields) |
-| `TELEGRAM_BOT_TOKEN` | Non | Notifications Telegram (estimations) |
 | `AUTO_TEST_WEBHOOK_SECRET` | Pour `auto-test` | Secret partagé avec feedback-app (contexte, captures, webhook HMAC) |
 
 ### 3. Variables repo (Settings > Variables)
