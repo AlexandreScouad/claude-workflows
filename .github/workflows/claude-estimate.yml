@@ -63,11 +63,6 @@ on:
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
-      # Plus utilisé (alertes Telegram retirées, feedback-app#635). Gardé
-      # déclaré : un appelant workflow_call qui le passe encore échouerait
-      # sinon.
-      TELEGRAM_BOT_TOKEN:
-        required: false
       PLANE_API_TOKEN:
         required: false
       # Bearer secret for POST /api/agent-callback (run-id reporting). Only
