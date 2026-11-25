@@ -350,6 +350,16 @@ jobs:
             statuts et des identifiants (jamais d'email, de nom, de téléphone,
             d'adresse ni de texte libre lu en base) : le plan est publié sur
             l'issue.
+          - **Provenance (OBLIGATOIRE avant de conclure)** : l'état actuel ne
+            suffit pas. Reconstitue la chronologie de chaque objet cité depuis
+            l'événement signalé (`agent.activity_logs` si la vue existe : qui
+            — rôle —, quoi — action, champs modifiés —, quand) et identifie le
+            **dernier flux qui a écrit l'état constaté**. Si une action
+            postérieure l'explique (correction manuelle, autre écran, import,
+            tâche planifiée), le flux cité dans le ticket n'est pas en cause :
+            dis-le dans le diagnostic et vise ce dernier flux, ou aucun code
+            s'il s'est comporté normalement. Ne conclus à un bug du flux cité
+            que si la chronologie montre que c'est lui qui a produit l'état.
           - **Classe le bug** d'après ce que tu constates en prod :
             - `code` (cas 1) : bug de code révélé par une donnée saine ;
             - `data` (cas 2) : donnée abîmée, code sain ou déjà corrigé ;
@@ -596,6 +606,23 @@ jobs:
               à recréer pour le tester (statut, champs vides, relations) —
               jamais de valeur réelle copiée de la prod.
 
+            **Cause à vérifier sur les données prod** : si le ticket décrit
+            l'état d'un objet précis de la prod (une tâche, une commande, un
+            appareil, une ligne… cité par son numéro, ou « Vu en : PROD » sur
+            un état de donnée), la cause n'est **établie** que si tu l'as
+            constatée sur ces données, chronologie comprise.
+            - Tes hypothèses incluent **toujours** : « l'état a été produit
+              correctement, puis modifié après coup (correction manuelle, autre
+              écran, import, tâche planifiée) ».
+            - Si tu n'as pas pu le vérifier toi-même (pas de lecture prod, ou
+              lecture insuffisante) : écris `"prod_check_required": true` dans
+              `plan-confidence.json`, dis-le dans l'Executive Summary, et fais
+              du diagnostic prod une **Étape 0 bloquante pour TOUTES les
+              étapes de code** (le dev ne commence pas sans son résultat), pas
+              seulement pour la réparation des données.
+            - Sinon (cause constatée en prod, ou ticket sans donnée prod en
+              jeu, comme un bug visuel) : `"prod_check_required": false`.
+
             ${{ steps.prod_read.outputs.prompt_section }}
 
             Pour chaque zone modifiée, identifie les **dépendances en cascade**
@@ -735,9 +762,14 @@ jobs:
                 "acceptance_criteria_met": N
               },
               "risk_level": "green|yellow|red",
-              "auto_approve": bool
+              "auto_approve": bool,
+              "prod_check_required": bool
             }
             ```
+
+            `prod_check_required: true` (cause à confirmer sur les données
+            prod, voir plus haut) empêche l'auto-approbation quand le plan n'a
+            pas lu la prod : le plan part en revue humaine.
 
             ## Taille prévue par le plan (`plan-size.json`)
 
@@ -850,6 +882,22 @@ jobs:
               jq '.auto_approve = false' plan-confidence.json > plan-confidence.tmp && mv plan-confidence.tmp plan-confidence.json
               echo "::notice::auto-approbation désactivée : bug de données ($CASE), diagnostic à valider par l'admin"
             fi
+          fi
+
+      # ── Cause à confirmer en prod, non vérifiée (feedback-app, Cockpit #2392) ──
+      # Le plan déclare `prod_check_required` quand la cause dépend de données
+      # prod qu'il n'a pas pu lire : jamais d'auto-approbation. Étape à part de
+      # « Fermer la lecture prod » : le cas visé est justement celui où la
+      # lecture prod n'a PAS été ouverte. La Feedback App applique la même règle
+      # à la réception du plan ; ce garde-fou garde l'issue cohérente (pas de
+      # commentaire « Auto-approbation » ni de label plan-approved).
+      - name: Cause non vérifiée en prod → pas d'auto-approbation
+        if: always() && steps.check-approved.outputs.skip != 'true'
+        run: |
+          if [ ! -f prod-data.json ] && [ -f plan-confidence.json ] \
+             && [ "$(jq -r '.prod_check_required // false' plan-confidence.json 2>/dev/null)" = "true" ]; then
+            jq '.auto_approve = false' plan-confidence.json > plan-confidence.tmp && mv plan-confidence.tmp plan-confidence.json
+            echo "::notice::auto-approbation désactivée : cause à confirmer sur les données prod, non vérifiée par le plan"
           fi
 
       # ── Tracking consommation tokens → DB feedback-app ──
