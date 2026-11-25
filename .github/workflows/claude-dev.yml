@@ -817,6 +817,79 @@ jobs:
           - Si tu veux régénérer un plan complet : ré-ajoute \`claude-ready\`"
           echo "Plan mismatch handled — workflow stops here (success)"
 
+      # ── Pilote TokenEconomizer (docs/pilote-token-economizer.md) ──
+      # Plugin de microsoft/TokenEconomizer (MIT), épinglé sur un commit relu,
+      # chargé pour la SEULE session d'implémentation via `--plugin-dir` : rien
+      # n'est installé dans ~/.claude du runner, aucun autre workflow ni dépôt
+      # ne le voit. Éteint par défaut : il faut le dépôt cible dans la variable
+      # TOKENECONOMIZER_REPOS ET un répertoire d'état partagé entre runners
+      # (TOKENECONOMIZER_HOME). Toute anomalie → pilote ignoré, run normal.
+      # Dépôt public : rien de ce que le plugin apprend n'est écrit dans les logs.
+      - name: TokenEconomizer pilot (setup)
+        id: te
+        if: |
+          steps.check-existing.outputs.skip != 'true' &&
+          steps.validation.outputs.valid != 'false'
+        continue-on-error: true
+        env:
+          REPO: ${{ steps.ctx.outputs.repo }}
+          TE_REPOS: ${{ vars.TOKENECONOMIZER_REPOS }}
+          TE_HOME: ${{ vars.TOKENECONOMIZER_HOME }}
+          TE_PHASE: ${{ vars.TOKENECONOMIZER_PHASE }}
+          TE_PY: ${{ vars.TOKENECONOMIZER_PYTHON }}
+        run: |
+          set -u
+          # Commit relu. Le changer = relire le diff amont avant (le plugin
+          # tourne sur le runner avec les secrets de l'étape dans son env).
+          TE_SHA=fa5604a3673fb3fa8c9932b942dd210e7afb18f3
+          off() {
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            if [ -n "${1:-}" ]; then echo "::warning::TokenEconomizer : $1"; fi
+            exit 0
+          }
+          repo_lc=$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')
+          listed=false
+          for r in $(printf '%s' "$TE_REPOS" | tr 'A-Z,' 'a-z '); do
+            if [ "$r" = "$repo_lc" ]; then listed=true; fi
+          done
+          [ "$listed" = true ] || off ""
+          case "$TE_HOME" in
+            "") off "TOKENECONOMIZER_HOME vide : pilote ignoré (l'apprentissage serait perdu)" ;;
+            *[[:space:]]*) off "TOKENECONOMIZER_HOME ne doit pas contenir d'espace" ;;
+            /*) ;;
+            *) off "TOKENECONOMIZER_HOME doit être un chemin absolu" ;;
+          esac
+          mkdir -p "$TE_HOME/src" 2>/dev/null && [ -w "$TE_HOME" ] || off "$TE_HOME non accessible en écriture"
+          PY="${TE_PY:-python3}"
+          "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null \
+            || off "Python >= 3.10 introuvable ($PY) : pilote ignoré"
+          SRC="$TE_HOME/src/$TE_SHA"
+          if [ ! -f "$SRC/plugin/.claude-plugin/plugin.json" ]; then
+            TMP=$(mktemp -d "$TE_HOME/src/.tmp.XXXXXX")
+            if git -C "$TMP" init -q \
+              && git -C "$TMP" fetch -q --depth 1 https://github.com/microsoft/TokenEconomizer.git "$TE_SHA" \
+              && git -C "$TMP" checkout -q FETCH_HEAD; then
+              # Un autre runner a pu le poser entre-temps : on garde le sien.
+              mv -T "$TMP" "$SRC" 2>/dev/null || rm -rf "$TMP"
+            else
+              rm -rf "$TMP"
+              off "téléchargement de TokenEconomizer@$TE_SHA impossible : pilote ignoré"
+            fi
+          fi
+          [ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null)" = "$TE_SHA" ] \
+            || off "copie de TokenEconomizer incohérente ($SRC) : pilote ignoré"
+          case "${TE_PHASE:-shadow}" in on) SHADOW=false ;; *) SHADOW=true ;; esac
+          {
+            echo "enabled=true"
+            echo "plugin_dir=$SRC/plugin"
+            echo "home=$TE_HOME"
+            echo "shadow=$SHADOW"
+            echo "python=$PY"
+            echo "te=$SRC/plugin/scripts/te"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$SHADOW" = true ]; then MODE=observation; else MODE=actif; fi
+          echo "::notice::TokenEconomizer chargé (mode $MODE, ${TE_SHA:0:7})"
+
       # ── Implement with Claude ──
       # Note: issue title used in prompt: input (action parameter, not shell)
       - name: Implement with Claude
@@ -830,6 +903,17 @@ jobs:
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           RISK_LEVEL: ${{ steps.risk.outputs.risk_level }}
           TDD_MODE: ${{ steps.tdd.outputs.tdd_mode }}
+          # Pilote TokenEconomizer : lus par le plugin seulement, qui n'est
+          # chargé que si `--plugin-dir` figure dans claude_args (sinon sans effet).
+          # Micro-skills + loop guard ; tool pruning coupé (il écrit dans
+          # .claude/settings.local.json du checkout, effacé à chaque run).
+          TOKENECONOMIZER_HOME: ${{ steps.te.outputs.home }}
+          TE_PYTHON: ${{ steps.te.outputs.python }}
+          TE_MODE: headless
+          TE_SHADOW: ${{ steps.te.outputs.shadow || 'true' }}
+          TE_MICROSKILLS: "on"
+          TE_TOOLPRUNE: "off"
+          TE_LOOPGUARD: "on"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "makeplane[bot]"
@@ -960,7 +1044,7 @@ jobs:
 
           # --strict-mcp-config + --mcp-config vide : voir "Write empty MCP
           # config" ci-dessus (#2048).
-          claude_args: '--model ${{ inputs.model }} --effort ${{ steps.risk.outputs.effort }}${{ inputs.advisor != '''' && format('' --advisor {0}'', inputs.advisor) || '''' }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}'
+          claude_args: '--model ${{ inputs.model }} --effort ${{ steps.risk.outputs.effort }}${{ inputs.advisor != '''' && format('' --advisor {0}'', inputs.advisor) || '''' }} --max-turns ${{ inputs.max_turns }} --strict-mcp-config --mcp-config ${{ steps.empty_mcp.outputs.path }}${{ steps.te.outputs.enabled == ''true'' && format('' --plugin-dir {0}'', steps.te.outputs.plugin_dir) || '''' }}'
 
       # ── Tracking usage du step implementation (Opus) → DB feedback-app ──
       # Le step validation a déjà été persisté plus haut (avant cet écrasement).
@@ -981,6 +1065,45 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/AlexandreScouad/claude-workflows/${REF}/scripts/report-usage.cjs" -o "$RUNNER_TEMP/report-usage.cjs" \
             && node "$RUNNER_TEMP/report-usage.cjs" \
             || echo "::notice::report-usage (implementation) skipped"
+
+      # ── Pilote TokenEconomizer : apprendre de la session qui vient de finir ──
+      # Le plugin « plie » la session dans un processus détaché que le runner tue
+      # en fin de job (orphelin) ; on le fait ici, de façon synchrone (verrou par
+      # dépôt : attend un pli détaché déjà en cours au lieu de compter deux fois).
+      # Sortie dans $TOKENECONOMIZER_HOME/logs, jamais dans le log public.
+      - name: TokenEconomizer pilot (fold)
+        if: always() && steps.te.outputs.enabled == 'true' && steps.implement.outcome != 'skipped'
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          TOKENECONOMIZER_HOME: ${{ steps.te.outputs.home }}
+          TE_PYTHON: ${{ steps.te.outputs.python }}
+          TE_MODE: headless
+          TE_SHADOW: ${{ steps.te.outputs.shadow }}
+          TE_MICROSKILLS: "on"
+          TE_TOOLPRUNE: "off"
+          TE_LOOPGUARD: "on"
+          TE_BIN: ${{ steps.te.outputs.te }}
+          # Le proposeur de faits appelle `claude -p` (même abonnement).
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          EXEC_FILE: ${{ steps.implement.outputs.execution_file }}
+        run: |
+          mkdir -p "$TOKENECONOMIZER_HOME/logs"
+          LOG="$TOKENECONOMIZER_HOME/logs/fold-$RUN_ID.log"
+          # Session nommée explicitement : ne dépend pas du hook SessionEnd
+          # (non garanti sous le SDK de claude-code-action). Sinon : sessions en attente.
+          SID=""
+          if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
+            SID=$(jq -r '[.[] | select(.type == "system" and .subtype == "init") | .session_id][0] // empty' "$EXEC_FILE" 2>/dev/null || true)
+          fi
+          set -- --host claude fold --verbose
+          if [ -n "$SID" ]; then set -- "$@" --session "$SID"; fi
+          if "$TE_BIN" "$@" > "$LOG" 2>&1; then
+            echo "::notice::TokenEconomizer : session pliée (détail sur le runner)"
+          else
+            echo "::warning::TokenEconomizer : échec du pli (détail sur le runner, logs/fold-$RUN_ID.log)"
+          fi
 
       - name: Lint fix (safety net)
         if: |
