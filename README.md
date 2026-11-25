@@ -38,6 +38,11 @@ Workflows GitHub Actions reutilisables pour l'automatisation du cycle de develop
 | `PLANE_WORKSPACE` | Plane integration | `scouad` |
 | `PLANE_PROJECT_ID` | Plane integration | `uuid-du-projet` |
 | `FEEDBACK_APP_URL` | auto-test | `https://feedback.scouad.fr` |
+| `TOKENECONOMIZER_REPOS` | Pilote TokenEconomizer (`claude-dev`, étape `implement`) — vide = éteint | `owner/repo-a,owner/repo-b` |
+| `TOKENECONOMIZER_HOME` | Pilote TokenEconomizer : état partagé entre runners (volume) | `/te-state` |
+| `TOKENECONOMIZER_PHASE` | Pilote TokenEconomizer : `shadow` (défaut) ou `on` | `shadow` |
+
+Pilote TokenEconomizer : prérequis VPS, phases, mesure et arrêt dans [`docs/pilote-token-economizer.md`](docs/pilote-token-economizer.md).
 
 ### 4. Ajouter a un projet
 
