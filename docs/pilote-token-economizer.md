@@ -147,10 +147,42 @@ Hors checkout : `$TE --host claude repos`. Journaux de pli : `/te-state/logs/fol
 - **Qualité :** nombre de runs `Claude Dev` par ticket (relances), PR marquées `wip:` ou
   refusées en revue, et retours de test. Comparer avec la période précédente.
 
+### Requête de comparaison
+
+[`pilote-token-economizer-comparaison.sql`](pilote-token-economizer-comparaison.sql), en lecture
+seule comme la précédente :
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -v pilotes='owner/repo-a,owner/repo-b' \
+  -v debut_shadow=AAAA-MM-JJ \
+  -v debut_on=AAAA-MM-JJ \
+  -v surcout_tokens=<tokens du plugin pendant la phase 2, lus par te status> \
+  -f docs/pilote-token-economizer-comparaison.sql
+```
+
+`fin` (défaut : maintenant) et `surcout_tokens` (défaut : 0) sont facultatifs. La période
+« avant » couvre les 60 jours qui précèdent `debut_shadow`. Le témoin regroupe les autres projets
+avec au moins 5 runs « avant » et 3 runs « après ». Trois sorties :
+
+1. **Par groupe et par période** (avant, observation, après) : runs, tickets, runs par ticket,
+   médiane et 75ᵉ percentile des tokens, coût médian. Plus le même détail pour chaque dépôt
+   pilote.
+2. **Synthèse :** évolution des médianes chez les pilotes (surcoût du plugin réparti sur leurs
+   runs « après ») et chez le témoin, écart en points, évolution des relances, et un **verdict**
+   qui applique les critères ci-dessous. Il signale aussi les cas impossibles à trancher : pas de
+   témoin, ou moins de 15 runs pilotes « après ».
+3. **Mélange des tickets :** part des runs par type et par taille dans chaque groupe et chaque
+   période. Si le mélange a nettement changé, l'écart peut venir des tickets et non du plugin.
+
+La période « observation » ne sert pas au calcul. Elle sert de contrôle : les tokens des
+pilotes ne doivent pas y bouger, puisque le plugin n'agit pas encore.
+
 ### Critères de décision (phase 3)
 
-- **On garde et on étend** si la médiane des tokens par run baisse d'au moins 10 % de plus que
-  chez le témoin, surcoût du plugin compris, sans hausse visible des relances ni des refus de PR.
+- **On garde et on étend** si la médiane des tokens par run baisse d'au moins 10 points de plus
+  que chez le témoin, surcoût du plugin compris, sans hausse des relances de plus de 0,25 run par
+  ticket par rapport au témoin, ni hausse visible des refus de PR.
 - **On arrête** si la qualité baisse, si un run est cassé par le plugin, ou si le gain est nul.
 
 ## Arrêt et nettoyage
