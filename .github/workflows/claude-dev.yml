@@ -1063,12 +1063,16 @@ jobs:
           ISSUE_NUMBER: ${{ steps.ctx.outputs.issue }}
           BASE_BRANCH: ${{ inputs.base_branch }}
           BASE_SHA: ${{ steps.implbranch.outputs.base_sha }}
+          EXEC_FILE: ${{ steps.implement.outputs.execution_file }}
         run: |
           # Cleanup temporary context files only.
           # Keep tech-debt-report.json, migrations-applied.json, migrations-summary.md
           # for the Create PR step to enrich the body, then they are cleaned up there.
           IMPL_BRANCH="claude/issue-$ISSUE_NUMBER"
-          rm -f IMPL_PLAN.md TEST-PLAN.md issue.md plan-validation.json
+          # plan-confidence.json et prod-check.md sont aussi du contexte écrit par
+          # le workflow : sans ce rm, le `git add -A` ci-dessous les commite et une
+          # branche sans aucun code de l'agent part quand même en PR (Cockpit #2409).
+          rm -f IMPL_PLAN.md TEST-PLAN.md issue.md plan-validation.json plan-confidence.json prod-check.md
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
@@ -1083,7 +1087,18 @@ jobs:
           if [ "$(git rev-parse HEAD)" != "$BASE_SHA" ]; then
             git push -u origin "HEAD:refs/heads/$IMPL_BRANCH"
           else
+            # L'agent s'est arrêté sans rien produire (souvent une étape du plan
+            # impossible en CI : diagnostic prod, accès externe). On échoue ici
+            # avec son message final plutôt que sur un `gh pr create` sans head.
             echo "Aucun commit au-dessus de $BASE_BRANCH — rien a pousser"
+            LAST_MSG=""
+            if [ -n "$EXEC_FILE" ] && [ -f "$EXEC_FILE" ]; then
+              LAST_MSG=$(jq -r '[.[]? | select(.type == "result")] | last | .result // empty' "$EXEC_FILE" 2>/dev/null | head -c 3000 || true)
+            fi
+            printf '%s' "$LAST_MSG" > dev-no-commit.txt
+            echo "::error::L'agent n'a produit aucun commit : pas de PR. Message final de l'agent ci-dessous."
+            echo "${LAST_MSG:-(message final indisponible)}"
+            exit 1
           fi
 
       - name: Create PR
@@ -1216,6 +1231,16 @@ jobs:
           fi
           if [ -f migrations-applied.json ] && [ "$(jq '[.migrations[] | select(.status == "failed")] | length' migrations-applied.json 2>/dev/null || echo 0)" -gt 0 ]; then
             REASON="Migration SQL en échec — voir migrations-applied.json dans les logs"
+          fi
+          if [ -f dev-no-commit.txt ]; then
+            LAST_MSG=$(cat dev-no-commit.txt)
+            REASON="L'agent s'est arrêté sans produire aucun commit, donc aucune PR. Cause fréquente : une étape du plan impossible en CI (diagnostic sur les données prod, accès externe).
+
+          <details><summary>Message final de l'agent</summary>
+
+          ${LAST_MSG:-(indisponible)}
+
+          </details>"
           fi
 
           gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "⚠️ **Échec de l'implémentation automatique**
