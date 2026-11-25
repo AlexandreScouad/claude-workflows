@@ -84,20 +84,29 @@ variables prennent effet **au run suivant**, sans tag ni déploiement.
 
 ## Choisir les dépôts pilotes
 
-Prendre les **deux dépôts qui ont eu le plus de runs `Claude Dev` sur les 60 derniers jours**.
-Les autres servent de groupe témoin sur la même période. Requête en lecture seule (règle 10 du
-CLAUDE.md de feedback-app : jamais de `SET` de session sur `DATABASE_URL`) :
+La requête [`pilote-token-economizer-choix-depots.sql`](pilote-token-economizer-choix-depots.sql)
+résume l'étape `implement` de `Claude Dev` sur 60 jours, par projet. Elle est en lecture seule et
+ouvre elle-même une transaction `read only` (règle 10 du CLAUDE.md de feedback-app : jamais de
+`SET` de session sur `DATABASE_URL`). À lancer depuis la racine de ce dépôt, avec le
+`DATABASE_URL` de feedback-app :
 
 ```bash
-psql "$DATABASE_URL" -1 -c "set transaction read only" -c "
-select p.slug, count(*) as runs,
-       percentile_cont(0.5) within group (order by u.total_tokens) as tokens_median,
-       round(sum(u.cost_eur)::numeric, 2) as cost_eur_total
-from claude_usage_runs u join projects p on p.id = u.project_id
-where u.workflow = 'Claude Dev' and u.step = 'implement'
-  and u.created_at > now() - interval '60 days'
-group by p.slug order by runs desc;"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/pilote-token-economizer-choix-depots.sql
 ```
+
+Par projet, elle donne les runs sur 30 et 60 jours, les tickets, les semaines actives, les
+relances par ticket, la médiane et le 75ᵉ percentile des tokens, la part de lecture de cache, le
+coût et le dernier run. Elle classe chaque projet ainsi :
+
+- **`candidat`** : au moins 10 runs sur 30 jours et 6 semaines actives sur les 60 derniers jours,
+  de quoi boucler les phases 1 et 2 en 10 semaines environ ;
+- **`témoin`** : au moins 5 runs sur 60 jours, pour la comparaison sur la même période ;
+- **`trop peu de runs`** : ignoré.
+
+Prendre les deux premiers `candidat` et mettre leur colonne `depot` dans `TOKENECONOMIZER_REPOS`.
+S'il y en a moins de deux, prendre les deux premières lignes et allonger les phases. Ces
+60 jours servent aussi de période « avant » pour la mesure : **garder le résultat** avec la date
+du jour.
 
 ## Phases
 
